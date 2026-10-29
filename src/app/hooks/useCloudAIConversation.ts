@@ -62,16 +62,12 @@ function formatCloudAiError(raw: string, a: AiStrings, variant: "chat" | "detail
 }
 
 function isCloudAiTransportError(err: unknown): boolean {
-  const e = err as { message?: unknown; name?: unknown } | null | undefined;
-  const msg = typeof e?.message === "string" ? e.message : "";
+  const msg = err instanceof Error ? err.message : "";
   return (
     msg === AI_NETWORK ||
-    msg === AI_TIMEOUT ||
     msg === ABORTED ||
     msg.includes("Failed to fetch") ||
-    msg.includes("NetworkError") ||
-    msg.includes("offline") ||
-    e?.name === "TypeError"
+    msg.includes("NetworkError")
   );
 }
 
@@ -282,12 +278,12 @@ export function useCloudAIConversation({ a, language, cloudAIConfig }: CloudAICo
 
     try {
       const aiExtras = await buildAIRequestExtras({ includeLocation: true });
-      const result = await cloudAIService.analyze(image, detections, language, aiExtras, (delta) => {
+      const result = await cloudAIService.analyze(image, detections, language, aiExtras, (full) => {
         if (gen !== aiAnalysisGenRef.current) return;
         setDeepAnalysisResult((prev) => ({
           provider: prev?.provider || '',
           model: prev?.model || '',
-          analysis: (prev?.analysis || '') + delta,
+          analysis: full,
           timestamp: prev?.timestamp || Date.now(),
         }));
       });
@@ -350,18 +346,6 @@ export function useCloudAIConversation({ a, language, cloudAIConfig }: CloudAICo
     history: buildCloudAiHistory(chatMessagesRef.current),
   });
 
-  const appendDeltaToLastAi = (delta: string) => {
-    setChatMessages((prev) => {
-      const next = prev.slice();
-      const last = next[next.length - 1];
-      if (last?.role === 'ai') {
-        next[next.length - 1] = { ...last, text: last.text + delta };
-        return next;
-      }
-      return [...next, { role: 'ai', text: delta }];
-    });
-  };
-
   const replaceLastAi = (text: string) => {
     setChatMessages((prev) => {
       const next = prev.slice();
@@ -399,7 +383,7 @@ export function useCloudAIConversation({ a, language, cloudAIConfig }: CloudAICo
         deepAnalysisResult?.analysis || '',
         language,
         aiExtras,
-        appendDeltaToLastAi,
+        replaceLastAi,
       );
       replaceLastAi(reply);
       refreshGuardState();
@@ -446,7 +430,7 @@ export function useCloudAIConversation({ a, language, cloudAIConfig }: CloudAICo
     setChatMessages((prev) => [...prev, { role: 'ai', text: '' }]);
     try {
       const aiExtras = withHistory(await buildAIRequestExtras());
-      const reply = await cloudAIService.followUp(trimmed, deepAnalysisResult.analysis, language, aiExtras, appendDeltaToLastAi);
+      const reply = await cloudAIService.followUp(trimmed, deepAnalysisResult.analysis, language, aiExtras, replaceLastAi);
       replaceLastAi(reply);
       refreshGuardState();
     } catch (err: unknown) {
@@ -512,7 +496,7 @@ export function useCloudAIConversation({ a, language, cloudAIConfig }: CloudAICo
           { role: 'user', text: '', voiceDuration: durationSec },
         ]),
       };
-      const reply = await cloudAIService.voiceFollowUp(audioBase64, deepAnalysisResult?.analysis || '', language, aiExtras, appendDeltaToLastAi);
+      const reply = await cloudAIService.voiceFollowUp(audioBase64, deepAnalysisResult?.analysis || '', language, aiExtras, replaceLastAi);
       replaceLastAi(reply);
       refreshGuardState();
     } catch (err: unknown) {

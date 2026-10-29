@@ -42,6 +42,51 @@ function jsonResponse(body: unknown, status: number): Response {
   });
 }
 
+/** Mock async job: POST → 202 running, GET /result → done (optional partial steps). */
+function mockJobFlow(
+  fetchMock: ReturnType<typeof vi.fn>,
+  opts: {
+    doneAnalysis: string;
+    partials?: string[];
+    postFailCount?: number;
+    failedError?: string;
+    provider?: string;
+    model?: string;
+  },
+): void {
+  let pollIdx = 0;
+  let postAttempts = 0;
+  fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+    const u = String(url);
+    if (u.includes("/result?")) {
+      if (opts.failedError) {
+        return jsonResponse({ status: "failed", error: opts.failedError }, 200);
+      }
+      const partials = opts.partials ?? [];
+      if (pollIdx < partials.length) {
+        const analysis = partials[pollIdx]!;
+        pollIdx += 1;
+        return jsonResponse({ status: "running", analysis }, 202);
+      }
+      return jsonResponse(
+        {
+          status: "done",
+          analysis: opts.doneAnalysis,
+          provider: opts.provider ?? "qwen",
+          model: opts.model ?? "qwen-max",
+        },
+        200,
+      );
+    }
+    postAttempts += 1;
+    if (opts.postFailCount && postAttempts <= opts.postFailCount) {
+      throw new TypeError("Failed to fetch");
+    }
+    const body = JSON.parse(String(init?.body ?? "{}")) as { jobId?: string };
+    return jsonResponse({ jobId: body.jobId, status: "running" }, 202);
+  });
+}
+
 describe("CloudAIService error mapping", () => {
   const fetchMock = vi.fn();
 
@@ -75,19 +120,20 @@ describe("CloudAIService error mapping", () => {
     await expect(cloudAIService.followUp("hello", "previous")).rejects.toThrow(UPSTREAM_BUSY);
   });
 
-  it("does not send modelId; the Edge function picks the model from app_config", async () => {
-    fetchMock.mockResolvedValue(jsonResponse({ analysis: "ok", provider: "qwen", model: "qwen-max" }, 200));
+  it("does not send modelId; submits async job with JSON accept", async () => {
+    mockJobFlow(fetchMock, { doneAnalysis: "ok" });
     await expect(cloudAIService.followUp("hello", "previous")).resolves.toBe("ok");
     const [url, init] = fetchMock.mock.calls[0]!;
     expect(url).toBe("https://example.supabase.co/functions/v1/ai-vision-proxy");
     const body = JSON.parse(String((init as RequestInit).body));
     expect(body).not.toHaveProperty("modelId");
     expect(body.maxTokens).toBe(512);
-    expect((init as RequestInit).headers).toMatchObject({ Accept: "text/event-stream" });
+    expect(body.jobId).toMatch(/^[0-9a-f-]{36}$/i);
+    expect((init as RequestInit).headers).toMatchObject({ Accept: "application/json" });
   });
 
   it("sends structured history and previousAnalysis separately", async () => {
-    fetchMock.mockResolvedValue(jsonResponse({ analysis: "ok" }, 200));
+    mockJobFlow(fetchMock, { doneAnalysis: "ok" });
     await cloudAIService.followUp("next?", "first diagnosis", "en", {
       history: [{ role: "user", content: "how to spray?" }, { role: "assistant", content: "use X" }],
     });
@@ -100,20 +146,30 @@ describe("CloudAIService error mapping", () => {
     ]);
   });
 
-  it("reads SSE deltas and returns the final analysis", async () => {
-    const sse = [
-      'data: {"delta":"Hel"}\n\n',
-      'data: {"delta":"lo"}\n\n',
-      'data: {"done":true,"analysis":"Hello","provider":"qwen","model":"qwen-max"}\n\n',
-    ].join("");
-    fetchMock.mockResolvedValue(
-      new Response(sse, { status: 200, headers: { "Content-Type": "text/event-stream" } }),
-    );
-    const deltas: string[] = [];
+  it("polls job partials and returns the final analysis", async () => {
+    mockJobFlow(fetchMock, { doneAnalysis: "Hello", partials: ["Hel", "Hello"] });
+    const partials: string[] = [];
     await expect(
-      cloudAIService.followUp("hi", "prev", "en", undefined, (d) => deltas.push(d)),
+      cloudAIService.followUp("hi", "prev", "en", undefined, (full) => partials.push(full)),
     ).resolves.toBe("Hello");
-    expect(deltas).toEqual(["Hel", "lo"]);
+    expect(partials).toEqual(["Hel", "Hello"]);
+  });
+
+  it("retries submit with the same jobId after transport failure", async () => {
+    mockJobFlow(fetchMock, { doneAnalysis: "ok", postFailCount: 1 });
+    await expect(cloudAIService.followUp("hello", "previous")).resolves.toBe("ok");
+    const postBodies = fetchMock.mock.calls
+      .filter(([url]) => !String(url).includes("/result?"))
+      .map(([, init]) => JSON.parse(String((init as RequestInit).body)).jobId);
+    expect(postBodies.length).toBeGreaterThanOrEqual(2);
+    expect(postBodies[0]).toBe(postBodies[1]);
+  });
+
+  it("maps failed job PROVIDER_AUTH to AI_PROVIDER_MISCONFIGURED", async () => {
+    mockJobFlow(fetchMock, { doneAnalysis: "", failedError: "PROVIDER_AUTH" });
+    await expect(cloudAIService.followUp("hello", "previous")).rejects.toThrow(
+      AI_PROVIDER_MISCONFIGURED,
+    );
   });
 });
 
@@ -139,38 +195,26 @@ describe("CloudAIService.analyze empty / non-string payloads", () => {
     vi.restoreAllMocks();
   });
 
-  it("rejects with AI_EMPTY_RESPONSE on 200 + empty analysis, and does not cache or count the call", async () => {
-    fetchMock.mockResolvedValue(jsonResponse({ analysis: "", provider: "qwen", model: "qwen-vl" }, 200));
+  it("rejects with AI_EMPTY_RESPONSE on failed job, and does not cache or count the call", async () => {
+    mockJobFlow(fetchMock, { doneAnalysis: "", failedError: "EMPTY_RESPONSE" });
     const before = cloudAIGuard.getDailyUsage().used;
     await expect(cloudAIService.analyze(tinyImage, [], "en")).rejects.toThrow(AI_EMPTY_RESPONSE);
     expect(cloudAIGuard.getDailyUsage().used).toBe(before);
 
-    // Second attempt must hit the network again (no dedup entry for the failed round).
-    fetchMock.mockResolvedValue(jsonResponse({ analysis: "Leaf rust, apply fungicide.", provider: "qwen", model: "qwen-vl" }, 200));
+    mockJobFlow(fetchMock, { doneAnalysis: "Leaf rust, apply fungicide." });
     await expect(cloudAIService.analyze(tinyImage, [], "en")).resolves.toMatchObject({
       analysis: "Leaf rust, apply fungicide.",
     });
-    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("joins OpenAI vision-style array content into the analysis text", async () => {
-    fetchMock.mockResolvedValue(
-      jsonResponse(
-        { choices: [{ message: { content: [{ type: "text", text: "Early " }, { type: "text", text: "blight." }] } }] },
-        200,
-      ),
-    );
+  it("returns analysis text from a completed job poll", async () => {
+    mockJobFlow(fetchMock, { doneAnalysis: "Early blight." });
     await expect(cloudAIService.analyze(tinyImage, [], "en")).resolves.toMatchObject({ analysis: "Early blight." });
   });
 
-  it("surfaces the Edge EMPTY_RESPONSE stream error as a retryable failure", async () => {
-    fetchMock.mockResolvedValue(
-      new Response('data: {"error":"EMPTY_RESPONSE"}\n\n', {
-        status: 200,
-        headers: { "Content-Type": "text/event-stream" },
-      }),
-    );
-    await expect(cloudAIService.analyze(tinyImage, [], "en")).rejects.toThrow("EMPTY_RESPONSE");
+  it("surfaces EMPTY_RESPONSE from a failed job poll", async () => {
+    mockJobFlow(fetchMock, { doneAnalysis: "", failedError: "EMPTY_RESPONSE" });
+    await expect(cloudAIService.analyze(tinyImage, [], "en")).rejects.toThrow(AI_EMPTY_RESPONSE);
   });
 
   it("ignores a legacy cached placeholder and re-requests", async () => {
@@ -182,9 +226,9 @@ describe("CloudAIService.analyze empty / non-string payloads", () => {
       timestamp: Date.now(),
     });
     await cloudAIGuard.cacheResult(tinyImage, legacy, "en");
-    fetchMock.mockResolvedValue(jsonResponse({ analysis: "Fresh answer" }, 200));
+    mockJobFlow(fetchMock, { doneAnalysis: "Fresh answer" });
     await expect(cloudAIService.analyze(tinyImage, [], "en")).resolves.toMatchObject({ analysis: "Fresh answer" });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("ai-vision-proxy"))).toBe(true);
   });
 });
 
@@ -210,9 +254,13 @@ describe("CloudAIService merged config cache", () => {
     localStorage.clear();
     cloudAIGuard.updateConfig({ cooldownSeconds: 0 });
     fetchMock.mockReset();
-    fetchMock.mockImplementation(async () =>
-      jsonResponse({ analysis: "ok", provider: "qwen", model: "qwen-max" }, 200),
-    );
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (String(url).includes("/result?")) {
+        return jsonResponse({ status: "done", analysis: "ok", provider: "qwen", model: "qwen-max" }, 200);
+      }
+      const body = JSON.parse(String(init?.body ?? "{}")) as { jobId?: string };
+      return jsonResponse({ jobId: body.jobId, status: "running" }, 202);
+    });
     vi.stubGlobal("fetch", fetchMock);
     vi.spyOn(console, "log").mockImplementation(() => {});
   });
@@ -224,8 +272,8 @@ describe("CloudAIService merged config cache", () => {
   });
 
   function lastBodyMaxTokens(): number {
-    const calls = fetchMock.mock.calls;
-    const init = calls[calls.length - 1]![1] as RequestInit;
+    const postCalls = fetchMock.mock.calls.filter(([url]) => !String(url).includes("/result?"));
+    const init = postCalls[postCalls.length - 1]![1] as RequestInit;
     return JSON.parse(String(init.body)).maxTokens;
   }
 

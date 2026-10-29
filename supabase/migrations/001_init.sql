@@ -643,6 +643,54 @@ GRANT EXECUTE ON FUNCTION public.ai_queue_release(UUID) TO service_role;
 
 
 -- ============================================================================
+-- 3a-ter. AI 异步任务 / 识别记录 — ai_jobs（Edge ai-vision-proxy 写入；管理员经 server /admin/ai-scan-records 读取）
+-- ============================================================================
+-- job_id 由客户端生成（幂等提交）；长期保留，不设自动 purge。GPS 为客户端已模糊到 2 位小数的 locationContext。
+
+CREATE TABLE IF NOT EXISTS ai_jobs (
+  job_id               UUID PRIMARY KEY,
+  user_id              UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  route                TEXT NOT NULL DEFAULT 'analysis',
+  status               TEXT NOT NULL DEFAULT 'running'
+    CHECK (status IN ('running', 'done', 'failed')),
+  analysis             TEXT,
+  provider             TEXT,
+  model                TEXT,
+  transcription        TEXT,
+  error                TEXT,
+  retry_after_seconds  INT,
+  latitude             DOUBLE PRECISION,
+  longitude            DOUBLE PRECISION,
+  accuracy_m           REAL,
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  finished_at          TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_jobs_user_created
+  ON ai_jobs (user_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_ai_jobs_created
+  ON ai_jobs (created_at DESC);
+
+ALTER TABLE ai_jobs ENABLE ROW LEVEL SECURITY;
+
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies WHERE tablename = 'ai_jobs' AND policyname = 'ai_jobs_service_role_only'
+  ) THEN
+    CREATE POLICY "ai_jobs_service_role_only"
+      ON ai_jobs FOR ALL
+      USING (auth.role() = 'service_role')
+      WITH CHECK (auth.role() = 'service_role');
+  END IF;
+END $$;
+
+COMMENT ON TABLE ai_jobs IS 'Cloud AI vision jobs + long-term scan records (time, blurred GPS, analysis text)';
+COMMENT ON COLUMN ai_jobs.latitude IS 'Blurred GPS (~1.1 km) from client locationContext on first analysis only';
+
+
+-- ============================================================================
 -- 3b. regional_oauth_identities — 微信 / 支付宝 / LINE 等「非 Supabase 内置 OAuth」主体与 Auth 用户映射
 -- ============================================================================
 -- Edge `server` 的 POST /wechat/exchange、POST /alipay/exchange、POST /line/exchange 使用：用厂商 code 换 openid/user_id 后

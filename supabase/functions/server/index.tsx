@@ -320,6 +320,121 @@ async function handleGetAdminDistributors(_req: Request): Promise<Response> {
   return json({ ok: true, rows: data ?? [] });
 }
 
+const ADMIN_USER_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/** GET /admin/ai-scan-records — AI scan history from ai_jobs (content admin JWT only). */
+async function handleGetAdminAiScanRecords(req: Request): Promise<Response> {
+  const admin = getAdminClient();
+  const url = new URL(req.url);
+  const q = (url.searchParams.get("q") || "").trim().slice(0, 120);
+  const routeParam = (url.searchParams.get("route") || "analysis").trim();
+  const from = (url.searchParams.get("from") || "").trim();
+  const to = (url.searchParams.get("to") || "").trim();
+  const before = (url.searchParams.get("before") || "").trim();
+  let limit = parseInt(url.searchParams.get("limit") || "200", 10);
+  if (!Number.isFinite(limit) || limit < 1) limit = 200;
+  limit = Math.min(500, limit);
+
+  let filterUserIds: string[] | null = null;
+  if (q) {
+    if (ADMIN_USER_UUID_RE.test(q)) {
+      filterUserIds = [q];
+    } else {
+      const safe = q.replace(/[%_,]/g, " ").trim();
+      if (!safe) {
+        return json({ ok: true, rows: [] });
+      }
+      const pattern = `%${safe}%`;
+      const [byName, byPhone] = await Promise.all([
+        admin.from("user_profiles").select("user_id").ilike("display_name", pattern).limit(500),
+        admin.from("user_profiles").select("user_id").ilike("phone", pattern).limit(500),
+      ]);
+      if (byName.error || byPhone.error) {
+        console.error("[admin/ai-scan-records] profile search", byName.error ?? byPhone.error);
+        return err("Database error", 500);
+      }
+      filterUserIds = [
+        ...new Set([
+          ...(byName.data ?? []).map((p) => String((p as { user_id: string }).user_id)),
+          ...(byPhone.data ?? []).map((p) => String((p as { user_id: string }).user_id)),
+        ]),
+      ];
+      if (filterUserIds.length === 0) {
+        return json({ ok: true, rows: [] });
+      }
+    }
+  }
+
+  let query = admin
+    .from("ai_jobs")
+    .select(
+      "job_id, user_id, route, status, analysis, provider, model, error, latitude, longitude, accuracy_m, created_at, finished_at",
+    )
+    .order("created_at", { ascending: false })
+    .limit(limit);
+
+  if (routeParam !== "all") {
+    query = query.eq("route", routeParam);
+  }
+  if (from) query = query.gte("created_at", from);
+  if (to) query = query.lte("created_at", to);
+  if (before) query = query.lt("created_at", before);
+  if (filterUserIds) query = query.in("user_id", filterUserIds);
+
+  const { data: jobs, error } = await query;
+  if (error) {
+    console.error("[admin/ai-scan-records] query", error);
+    return err(`Database error: ${error.message}`, 500);
+  }
+
+  const rows = jobs ?? [];
+  const userIds = [...new Set(rows.map((r) => String((r as { user_id: string }).user_id)))];
+  let profileByUser = new Map<string, { display_name: string; phone: string }>();
+  if (userIds.length > 0) {
+    const { data: profs, error: pErr } = await admin
+      .from("user_profiles")
+      .select("user_id, display_name, phone")
+      .in("user_id", userIds);
+    if (pErr) {
+      console.warn("[admin/ai-scan-records] profile merge", pErr);
+    } else {
+      for (const p of profs ?? []) {
+        const rec = p as { user_id: string; display_name?: string; phone?: string };
+        profileByUser.set(rec.user_id, {
+          display_name: String(rec.display_name ?? ""),
+          phone: String(rec.phone ?? ""),
+        });
+      }
+    }
+  }
+
+  const out = rows.map((row) => {
+    const r = row as Record<string, unknown>;
+    const uid = String(r.user_id);
+    const prof = profileByUser.get(uid);
+    return {
+      job_id: r.job_id,
+      user_id: uid,
+      display_name: prof?.display_name ?? "",
+      phone: prof?.phone ?? "",
+      created_at: r.created_at,
+      finished_at: r.finished_at,
+      status: r.status,
+      route: r.route,
+      latitude: r.latitude,
+      longitude: r.longitude,
+      accuracy_m: r.accuracy_m,
+      analysis: r.analysis,
+      provider: r.provider,
+      model: r.model,
+      error: r.error,
+    };
+  });
+
+  return json({ ok: true, rows: out });
+}
+
 /** POST /admin/user-roles — batch set content_role (none|editor) and/or app_role (farmer|distributor). Admin JWT only. */
 async function handlePostAdminUserRoles(
   req: Request,
@@ -619,6 +734,12 @@ Deno.serve(async (req: Request) => {
       const auth = await assertContentAdminOnly(req);
       if (auth instanceof Response) return auth;
       return await handleGetAdminDistributors(req);
+    }
+
+    if (route === "/admin/ai-scan-records" && method === "GET") {
+      const auth = await assertContentAdminOnly(req);
+      if (auth instanceof Response) return auth;
+      return await handleGetAdminAiScanRecords(req);
     }
 
     // =============================================

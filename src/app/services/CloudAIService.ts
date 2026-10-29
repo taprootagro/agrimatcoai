@@ -582,82 +582,215 @@ function extractReplyText(data: unknown): string {
   return JSON.stringify(data);
 }
 
-async function readCloudAiSse(
-  res: Response,
-  onDelta?: (delta: string) => void,
+const JOB_POLL_INTERVAL_MS = 2_000;
+const JOB_POLL_TOTAL_MS = 150_000;
+const JOB_POLL_FETCH_MS = 10_000;
+const JOB_SUBMIT_RETRIES_MS = [0, 1_000, 3_000] as const;
+
+type JobPollPayload = {
+  jobId?: string;
+  status?: string;
+  analysis?: string;
+  provider?: string;
+  model?: string;
+  transcription?: string;
+  error?: string;
+  retry_after_seconds?: number;
+};
+
+function newCloudJobId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function throwFromJobPayload(data: JobPollPayload): never {
+  const err = (data.error || "").trim();
+  if (err === "PROVIDER_AUTH" || err === "PROVIDER_CONFIG") {
+    throw new Error(AI_PROVIDER_MISCONFIGURED);
+  }
+  if (err === "UPSTREAM_BUSY") {
+    const retry = Number(data.retry_after_seconds);
+    if (Number.isFinite(retry) && retry > 0) {
+      cloudAIGuard.markServerCooldown(Math.ceil(retry));
+    }
+    throw new Error(UPSTREAM_BUSY);
+  }
+  if (err === "EMPTY_RESPONSE") throw new Error(AI_EMPTY_RESPONSE);
+  if (err) throw new Error(err);
+  throw new Error(AI_EMPTY_RESPONSE);
+}
+
+function isSubmitTransportError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  return (
+    msg === AI_NETWORK ||
+    msg === AI_TIMEOUT ||
+    msg.includes("Failed to fetch") ||
+    msg.includes("NetworkError")
+  );
+}
+
+async function pollJobResult(
+  endpoint: string,
+  jobId: string,
+  externalSignal?: AbortSignal,
+  onPartial?: (fullText: string) => void,
 ): Promise<unknown> {
-  if (!res.body) throw new Error(AI_NETWORK);
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = "";
-  let analysis = "";
-  let meta: Record<string, unknown> = {};
-  const deadline = Date.now() + 90_000;
-  while (true) {
-    if (Date.now() > deadline) throw new Error(AI_TIMEOUT);
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    const lines = buf.split("\n");
-    buf = lines.pop() ?? "";
-    for (const line of lines) {
-      const t = line.trim();
-      if (!t.startsWith("data:")) continue;
-      const payload = t.slice(5).trim();
-      if (!payload) continue;
-      let data: Record<string, unknown>;
-      try {
-        data = JSON.parse(payload) as Record<string, unknown>;
-      } catch {
-        continue;
+  const base = endpoint.replace(/\/+$/, "");
+  const pollUrl = `${base}/result?jobId=${encodeURIComponent(jobId)}`;
+  const deadline = Date.now() + JOB_POLL_TOTAL_MS;
+  let headers = await getCloudAIRequestHeaders();
+  let lastAnalysis = "";
+
+  while (Date.now() < deadline) {
+    if (externalSignal?.aborted) throw new Error(ABORTED);
+
+    const attemptController = new AbortController();
+    const linkAbort = () => attemptController.abort();
+    externalSignal?.addEventListener("abort", linkAbort, { once: true });
+    const timeoutId = setTimeout(() => attemptController.abort(), JOB_POLL_FETCH_MS);
+
+    try {
+      let res = await fetch(pollUrl, { headers, signal: attemptController.signal });
+      if (res.status === 401) {
+        await syncAccessTokenFromSupabaseSession();
+        headers = await getCloudAIRequestHeaders();
+        res = await fetch(pollUrl, { headers, signal: attemptController.signal });
       }
-      if (typeof data.error === "string" && data.error) throw new Error(data.error);
-      if (typeof data.delta === "string" && data.delta) {
-        analysis += data.delta;
-        onDelta?.(data.delta);
+
+      if (res.ok || res.status === 202) {
+        const data = (await res.json()) as JobPollPayload;
+        const analysis = typeof data.analysis === "string" ? data.analysis : "";
+        if (analysis && analysis !== lastAnalysis) {
+          lastAnalysis = analysis;
+          onPartial?.(analysis);
+        }
+        if (data.status === "done") {
+          return {
+            analysis: analysis || lastAnalysis,
+            provider: data.provider,
+            model: data.model,
+            transcription: data.transcription,
+          };
+        }
+        if (data.status === "failed") {
+          throwFromJobPayload(data);
+        }
       }
-      if (data.done === true) {
-        if (typeof data.analysis === "string") analysis = data.analysis;
-        meta = data;
+    } catch (err) {
+      if (isAbortError(err, externalSignal)) throw new Error(ABORTED);
+      const msg = err instanceof Error ? err.message : "";
+      if (
+        msg === AI_PROVIDER_MISCONFIGURED ||
+        msg === UPSTREAM_BUSY ||
+        msg === AI_EMPTY_RESPONSE ||
+        msg.startsWith("COOLDOWN:")
+      ) {
+        throw err;
+      }
+    } finally {
+      clearTimeout(timeoutId);
+      externalSignal?.removeEventListener("abort", linkAbort);
+    }
+
+    await sleepMs(JOB_POLL_INTERVAL_MS, externalSignal);
+  }
+  throw new Error(AI_TIMEOUT);
+}
+
+async function runCloudAIJob(
+  endpoint: string,
+  body: Record<string, unknown>,
+  options: {
+    attemptTimeoutMs: number;
+    externalSignal?: AbortSignal;
+    onQueueWait?: CloudAIQueueWaitHandler | null;
+    onPartial?: (fullText: string) => void;
+  },
+): Promise<unknown> {
+  const jobId = newCloudJobId();
+  const payload = { ...body, jobId };
+  let lastErr: unknown;
+
+  for (let i = 0; i < JOB_SUBMIT_RETRIES_MS.length; i++) {
+    if (options.externalSignal?.aborted) throw new Error(ABORTED);
+    if (i > 0) await sleepMs(JOB_SUBMIT_RETRIES_MS[i]!, options.externalSignal);
+
+    try {
+      const res = await fetchWithQueueRetry(
+        endpoint,
+        {
+          method: "POST",
+          body: JSON.stringify(payload),
+          headers: { Accept: "application/json" },
+        },
+        {
+          attemptTimeoutMs: options.attemptTimeoutMs,
+          externalSignal: options.externalSignal,
+          onQueueWait: options.onQueueWait ?? null,
+        },
+      );
+
+      if (!res.ok) {
+        const mapped = await mapAuthOrRateLimitError(res);
+        if (mapped) throw new Error(mapped);
+        const err = await res.json().catch(() => ({ error: "Unknown error" }));
+        const msg =
+          (err && typeof err === "object" &&
+            ((err as { error?: string }).error || (err as { message?: string }).message)) ||
+          `Server responded with ${res.status}`;
+        throw new Error(String(msg));
+      }
+
+      const data = (await res.json()) as JobPollPayload;
+      if (data.status === "done") {
+        return {
+          analysis: data.analysis,
+          provider: data.provider,
+          model: data.model,
+          transcription: data.transcription,
+        };
+      }
+      if (data.status === "failed") {
+        throwFromJobPayload(data);
+      }
+
+      const resolvedJobId = data.jobId || jobId;
+      return pollJobResult(
+        endpoint,
+        resolvedJobId,
+        options.externalSignal,
+        options.onPartial,
+      );
+    } catch (err) {
+      lastErr = err;
+      const msg = err instanceof Error ? err.message : "";
+      if (
+        msg === ABORTED ||
+        msg === CLOUD_AI_SESSION_EXPIRED ||
+        msg === CLOUD_AI_SESSION_TRANSIENT ||
+        msg === AI_PROVIDER_MISCONFIGURED ||
+        msg === AI_QUEUE_TIMEOUT ||
+        msg === "NOT_LOGGED_IN" ||
+        msg === "DAILY_LIMIT_REACHED" ||
+        msg.startsWith("COOLDOWN:")
+      ) {
+        throw err;
+      }
+      if (!isSubmitTransportError(err) || i === JOB_SUBMIT_RETRIES_MS.length - 1) {
+        throw mapFetchFailure(err, options.externalSignal);
       }
     }
   }
-  return { ...meta, analysis: (typeof meta.analysis === "string" ? meta.analysis : analysis) };
-}
 
-async function postCloudAI(
-  endpoint: string,
-  body: Record<string, unknown>,
-  attemptTimeoutMs: number,
-  onQueueWait: CloudAIQueueWaitHandler | null,
-  externalSignal?: AbortSignal,
-  onDelta?: (delta: string) => void,
-): Promise<unknown> {
-  const res = await fetchWithQueueRetry(
-    endpoint,
-    {
-      method: "POST",
-      body: JSON.stringify(body),
-      headers: { Accept: "text/event-stream" },
-    },
-    { attemptTimeoutMs, externalSignal, onQueueWait },
-  );
-
-  if (!res.ok) {
-    const mapped = await mapAuthOrRateLimitError(res);
-    if (mapped) throw new Error(mapped);
-    const err = await res.json().catch(() => ({ error: "Unknown error" }));
-    const msg =
-      (err && typeof err === "object" && ((err as { error?: string }).error || (err as { message?: string }).message)) ||
-      `Server responded with ${res.status}`;
-    throw new Error(String(msg));
-  }
-
-  const ct = res.headers.get("content-type") || "";
-  if (ct.includes("text/event-stream")) {
-    return readCloudAiSse(res, onDelta);
-  }
-  return res.json();
+  throw mapFetchFailure(lastErr, options.externalSignal);
 }
 
 // ---- MOCK analysis (for demo when no backend) ----
@@ -810,7 +943,7 @@ class CloudAIService {
     detections: { className: string; score: number }[],
     uiLanguage?: string,
     extras?: AIRequestExtras,
-    onDelta?: (delta: string) => void,
+    onPartial?: (fullText: string) => void,
   ): Promise<DeepAnalysisResult> {
     const cfg = getCloudAIConfig();
     if (!cfg.enabled) {
@@ -850,7 +983,7 @@ class CloudAIService {
       console.log(`[CloudAI] POST ${endpoint}`);
       const signal = this.beginInFlight();
       try {
-        const data = await postCloudAI(
+        const data = await runCloudAIJob(
           endpoint,
           {
             image: compressedImage,
@@ -862,10 +995,12 @@ class CloudAIService {
             ...(uiLanguage?.trim() ? { uiLanguage: uiLanguage.trim() } : {}),
             ...extrasToBody(extras),
           },
-          60_000,
-          this.onQueueWait,
-          signal,
-          onDelta,
+          {
+            attemptTimeoutMs: 30_000,
+            externalSignal: signal,
+            onQueueWait: this.onQueueWait,
+            onPartial,
+          },
         );
 
         const result = extractAnalysisText(data, cfg.providerName, cfg.modelId);
@@ -905,7 +1040,7 @@ class CloudAIService {
     previousAnalysis: string,
     uiLanguage?: string,
     extras?: AIRequestExtras,
-    onDelta?: (delta: string) => void,
+    onPartial?: (fullText: string) => void,
   ): Promise<string> {
     const cfg = getCloudAIConfig();
     if (!cfg.enabled) {
@@ -928,7 +1063,7 @@ class CloudAIService {
       console.log(`[CloudAI] Follow-up POST ${endpoint}`);
       const signal = this.beginInFlight();
       try {
-        const data = await postCloudAI(
+        const data = await runCloudAIJob(
           endpoint,
           {
             followUp: true,
@@ -938,10 +1073,12 @@ class CloudAIService {
             ...(uiLanguage?.trim() ? { uiLanguage: uiLanguage.trim() } : {}),
             ...extrasToBody(extras),
           },
-          60_000,
-          this.onQueueWait,
-          signal,
-          onDelta,
+          {
+            attemptTimeoutMs: 30_000,
+            externalSignal: signal,
+            onQueueWait: this.onQueueWait,
+            onPartial,
+          },
         );
         cloudAIGuard.recordCall();
         return extractReplyText(data);
@@ -970,7 +1107,7 @@ class CloudAIService {
     previousAnalysis: string,
     uiLanguage?: string,
     extras?: AIRequestExtras,
-    onDelta?: (delta: string) => void,
+    onPartial?: (fullText: string) => void,
   ): Promise<string> {
     const cfg = getCloudAIConfig();
     if (!cfg.enabled) {
@@ -995,7 +1132,7 @@ class CloudAIService {
       console.log(`[CloudAI] Follow-up with image POST ${endpoint}`);
       const signal = this.beginInFlight();
       try {
-        const data = await postCloudAI(
+        const data = await runCloudAIJob(
           endpoint,
           {
             followUp: true,
@@ -1006,10 +1143,12 @@ class CloudAIService {
             ...(uiLanguage?.trim() ? { uiLanguage: uiLanguage.trim() } : {}),
             ...extrasToBody(extras),
           },
-          60_000,
-          this.onQueueWait,
-          signal,
-          onDelta,
+          {
+            attemptTimeoutMs: 30_000,
+            externalSignal: signal,
+            onQueueWait: this.onQueueWait,
+            onPartial,
+          },
         );
         cloudAIGuard.recordCall();
         return extractReplyText(data);
@@ -1049,7 +1188,7 @@ class CloudAIService {
     previousAnalysis: string,
     uiLanguage?: string,
     extras?: AIRequestExtras,
-    onDelta?: (delta: string) => void,
+    onPartial?: (fullText: string) => void,
   ): Promise<string> {
     const cfg = getCloudAIConfig();
     if (!cfg.enabled) {
@@ -1072,7 +1211,7 @@ class CloudAIService {
       console.log(`[CloudAI] Voice follow-up POST ${endpoint} (audio size: ${Math.round(audioBase64.length / 1024)}KB)`);
       const signal = this.beginInFlight();
       try {
-        const data = (await postCloudAI(
+        const data = (await runCloudAIJob(
           endpoint,
           {
             voiceFollowUp: true,
@@ -1082,10 +1221,12 @@ class CloudAIService {
             ...(uiLanguage?.trim() ? { uiLanguage: uiLanguage.trim() } : {}),
             ...extrasToBody(extras),
           },
-          90_000,
-          this.onQueueWait,
-          signal,
-          onDelta,
+          {
+            attemptTimeoutMs: 30_000,
+            externalSignal: signal,
+            onQueueWait: this.onQueueWait,
+            onPartial,
+          },
         )) as Record<string, unknown>;
 
         let replyText = extractReplyText(data);

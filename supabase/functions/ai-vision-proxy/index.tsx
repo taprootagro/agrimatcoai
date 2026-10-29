@@ -384,191 +384,245 @@ function streamMaxMs(): number {
   return Math.min(180_000, Math.max(upstreamTimeoutMs(), envInt("AI_STREAM_MAX_MS", 120_000)));
 }
 
-function sseHeaders(): HeadersInit {
-  return {
-    ...CORS_HEADERS,
-    "Content-Type": "text/event-stream; charset=utf-8",
-    "Cache-Control": "no-cache",
-  };
+function jobMaxMs(): number {
+  const v = parseInt(Deno.env.get("AI_JOB_MAX_MS") || "", 10);
+  if (Number.isFinite(v) && v >= 30_000) return Math.min(130_000, v);
+  return 110_000;
 }
 
-function pipeProviderSse(
-  upstream: Response,
-  kind: "openai" | "gemini",
-  provider: string,
-  model: string,
-): Response {
-  const encoder = new TextEncoder();
-  const decoder = new TextDecoder();
-  const holder: UsageBits = { model, ok: false };
-  const started = Date.now();
-  const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      const send = (obj: unknown) => {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
-      };
-      let full = "";
-      try {
-        if (!upstream.body) {
-          send({ error: "UPSTREAM_BUSY" });
-          return;
-        }
-        const reader = upstream.body.getReader();
-        let buf = "";
-        while (true) {
-          if (Date.now() - started > streamMaxMs()) {
-            send({ error: "UPSTREAM_BUSY" });
-            break;
-          }
-          const { done, value } = await reader.read();
-          if (done) break;
-          buf += decoder.decode(value, { stream: true });
-          const parts = buf.split("\n");
-          buf = parts.pop() ?? "";
-          for (const line of parts) {
-            const t = line.trim();
-            if (!t.startsWith("data:")) continue;
-            const payload = t.slice(5).trim();
-            if (!payload || payload === "[DONE]") continue;
-            let data: any;
-            try {
-              data = JSON.parse(payload);
-            } catch {
-              continue;
-            }
-            const delta = kind === "openai"
-              ? textFromParts(data.choices?.[0]?.delta?.content)
-              : extractText(data);
-            if (delta) {
-              full += delta;
-              send({ delta });
-            }
-            const u = usageFromProviderPayload(data);
-            if (u.prompt_tokens != null || u.completion_tokens != null) {
-              holder.prompt_tokens = u.prompt_tokens ?? holder.prompt_tokens;
-              holder.completion_tokens = u.completion_tokens ?? holder.completion_tokens;
-            }
-          }
-        }
-        if (!full.trim()) {
-          // No text at all (filtered / refusal / unexpected chunk shape): fail so the client
-          // shows a retryable error and the quota is refunded instead of returning "".
-          console.warn(`[ai-vision][${provider}] stream ended with empty analysis`, { model });
-          send({ error: "EMPTY_RESPONSE" });
-          return;
-        }
-        holder.ok = true;
-        send({ done: true, analysis: full, provider, model });
-      } catch (e) {
-        console.error("[ai-vision] stream pipe failed", e);
-        send({ error: "UPSTREAM_BUSY" });
-      } finally {
-        try { await upstream.body?.cancel(); } catch { /* ignore */ }
-        controller.close();
-      }
-    },
-    cancel() {
-      try { void upstream.body?.cancel(); } catch { /* ignore */ }
-    },
-  });
-  return rememberUsage(new Response(stream, { status: 200, headers: sseHeaders() }), holder);
-}
+type ProviderFailCode = "UPSTREAM_BUSY" | "PROVIDER_AUTH" | "PROVIDER_CONFIG" | "EMPTY_RESPONSE";
 
-function attachStreamLifecycle(
-  resp: Response,
-  onSettle: (ok: boolean) => Promise<void>,
-): Response {
-  const src = resp.body;
-  if (!src) {
-    void onSettle(false);
-    return resp;
+type ProviderResult =
+  | {
+    ok: true;
+    text: string;
+    provider: string;
+    model: string;
+    transcription?: string;
+    prompt_tokens?: number | null;
+    completion_tokens?: number | null;
   }
-  let once = false;
-  const finish = (ok: boolean) => {
-    if (once) return;
-    once = true;
-    void onSettle(ok);
-  };
-  const holder = usageByResponse.get(resp);
-  const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      const reader = src.getReader();
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          controller.enqueue(value);
-        }
-        finish(holder?.ok === true);
-        controller.close();
-      } catch (e) {
-        finish(false);
-        controller.error(e);
-      }
-    },
-    cancel() {
-      finish(false);
-      void src.cancel();
-    },
-  });
-  const wrapped = new Response(stream, { status: resp.status, headers: resp.headers });
-  if (holder) usageByResponse.set(wrapped, holder);
-  return wrapped;
+  | { ok: false; error: ProviderFailCode; retryAfter?: number };
+
+async function providerResultFromHttpResponse(res: Response): Promise<ProviderResult> {
+  try {
+    const data = await res.clone().json();
+    const err = String((data as { error?: string })?.error ?? "");
+    if (err === "PROVIDER_AUTH" || err === "PROVIDER_CONFIG") {
+      return { ok: false, error: err };
+    }
+    if (err === "EMPTY_RESPONSE") return { ok: false, error: "EMPTY_RESPONSE" };
+    const retry = Number((data as { retry_after_seconds?: number })?.retry_after_seconds);
+    return {
+      ok: false,
+      error: "UPSTREAM_BUSY",
+      retryAfter: Number.isFinite(retry) && retry > 0 ? retry : 15,
+    };
+  } catch {
+    return { ok: false, error: "UPSTREAM_BUSY", retryAfter: 15 };
+  }
 }
 
-async function completeOpenAiStyle(
+async function consumeOpenAiStream(
+  upstream: Response,
+  onDelta: ((text: string) => void) | undefined,
+  deadline: number,
+): Promise<ProviderResult & { ok: true } | Extract<ProviderResult, { ok: false }>> {
+  const decoder = new TextDecoder();
+  let full = "";
+  let prompt_tokens: number | null = null;
+  let completion_tokens: number | null = null;
+  if (!upstream.body) return { ok: false, error: "UPSTREAM_BUSY", retryAfter: 15 };
+  const reader = upstream.body.getReader();
+  let buf = "";
+  try {
+    while (true) {
+      if (Date.now() > deadline) return { ok: false, error: "UPSTREAM_BUSY", retryAfter: 15 };
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const parts = buf.split("\n");
+      buf = parts.pop() ?? "";
+      for (const line of parts) {
+        const t = line.trim();
+        if (!t.startsWith("data:")) continue;
+        const payload = t.slice(5).trim();
+        if (!payload || payload === "[DONE]") continue;
+        let data: any;
+        try {
+          data = JSON.parse(payload);
+        } catch {
+          continue;
+        }
+        const delta = textFromParts(data.choices?.[0]?.delta?.content);
+        if (delta) {
+          full += delta;
+          onDelta?.(full);
+        }
+        const u = usageFromProviderPayload(data);
+        if (u.prompt_tokens != null) prompt_tokens = u.prompt_tokens;
+        if (u.completion_tokens != null) completion_tokens = u.completion_tokens;
+      }
+    }
+  } finally {
+    try { await upstream.body?.cancel(); } catch { /* ignore */ }
+  }
+  if (!full.trim()) return { ok: false, error: "EMPTY_RESPONSE" };
+  return {
+    ok: true,
+    text: full,
+    provider: "",
+    model: "",
+    prompt_tokens,
+    completion_tokens,
+  };
+}
+
+async function consumeGeminiStream(
+  upstream: Response,
+  onDelta: ((text: string) => void) | undefined,
+  deadline: number,
+): Promise<ProviderResult & { ok: true } | Extract<ProviderResult, { ok: false }>> {
+  const decoder = new TextDecoder();
+  let full = "";
+  let prompt_tokens: number | null = null;
+  let completion_tokens: number | null = null;
+  if (!upstream.body) return { ok: false, error: "UPSTREAM_BUSY", retryAfter: 15 };
+  const reader = upstream.body.getReader();
+  let buf = "";
+  try {
+    while (true) {
+      if (Date.now() > deadline) return { ok: false, error: "UPSTREAM_BUSY", retryAfter: 15 };
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const parts = buf.split("\n");
+      buf = parts.pop() ?? "";
+      for (const line of parts) {
+        const t = line.trim();
+        if (!t.startsWith("data:")) continue;
+        const payload = t.slice(5).trim();
+        if (!payload) continue;
+        let data: any;
+        try {
+          data = JSON.parse(payload);
+        } catch {
+          continue;
+        }
+        const delta = extractText(data);
+        if (delta) {
+          full += delta;
+          onDelta?.(full);
+        }
+        const u = usageFromProviderPayload(data);
+        if (u.prompt_tokens != null) prompt_tokens = u.prompt_tokens;
+        if (u.completion_tokens != null) completion_tokens = u.completion_tokens;
+      }
+    }
+  } finally {
+    try { await upstream.body?.cancel(); } catch { /* ignore */ }
+  }
+  if (!full.trim()) return { ok: false, error: "EMPTY_RESPONSE" };
+  return {
+    ok: true,
+    text: full,
+    provider: "",
+    model: "",
+    prompt_tokens,
+    completion_tokens,
+  };
+}
+
+async function completeOpenAiStyleResult(
   label: string,
   url: string,
   payload: Record<string, unknown>,
   apiKey: string,
   provider: string,
   model: string,
-): Promise<Response> {
-  const stream = requestWantsStream;
+  onDelta?: (text: string) => void,
+): Promise<ProviderResult> {
+  const deadline = Date.now() + jobMaxMs();
   const res = await invokeProvider(label, url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`,
     },
-    body: JSON.stringify(stream ? { ...payload, stream: true } : payload),
-  }, stream ? "stream" : "json");
-  if (!res.ok) return res;
-  if (stream) return pipeProviderSse(res, "openai", provider, model);
-  const data = await res.json();
-  const analysis = extractText(data);
-  if (!analysis.trim()) return emptyAnalysisResponse(label, data);
-  return rememberUsage(
-    json({ analysis, provider, model }),
-    { model, ...usageFromProviderPayload(data), ok: true },
-  );
+    body: JSON.stringify({ ...payload, stream: true }),
+  }, "stream");
+  if (!res.ok) return providerResultFromHttpResponse(res);
+  const streamed = await consumeOpenAiStream(res, onDelta, deadline);
+  if (!streamed.ok) return streamed;
+  return {
+    ok: true,
+    text: streamed.text,
+    provider,
+    model,
+    prompt_tokens: streamed.prompt_tokens,
+    completion_tokens: streamed.completion_tokens,
+  };
 }
 
-async function completeGeminiStyle(
+async function completeGeminiStyleResult(
   label: string,
   baseUrl: string,
   model: string,
   apiKey: string,
   payload: Record<string, unknown>,
-): Promise<Response> {
-  const stream = requestWantsStream;
-  const url = stream
-    ? `${baseUrl}/models/${model}:streamGenerateContent?alt=sse`
-    : `${baseUrl}/models/${model}:generateContent`;
+  onDelta?: (text: string) => void,
+): Promise<ProviderResult> {
+  const deadline = Date.now() + jobMaxMs();
+  const url = `${baseUrl}/models/${model}:streamGenerateContent?alt=sse`;
   const res = await invokeProvider(label, url, {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
     body: JSON.stringify(payload),
-  }, stream ? "stream" : "json");
-  if (!res.ok) return res;
-  if (stream) return pipeProviderSse(res, "gemini", "Gemini", model);
+  }, "stream");
+  if (!res.ok) return providerResultFromHttpResponse(res);
+  const streamed = await consumeGeminiStream(res, onDelta, deadline);
+  if (!streamed.ok) return streamed;
+  return {
+    ok: true,
+    text: streamed.text,
+    provider: "Gemini",
+    model,
+    prompt_tokens: streamed.prompt_tokens,
+    completion_tokens: streamed.completion_tokens,
+  };
+}
+
+async function completeOpenAiJsonResult(
+  label: string,
+  url: string,
+  payload: Record<string, unknown>,
+  apiKey: string,
+  provider: string,
+  model: string,
+): Promise<ProviderResult> {
+  const res = await invokeProvider(label, url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify(payload),
+  }, "json");
+  if (!res.ok) return providerResultFromHttpResponse(res);
   const data = await res.json();
   const analysis = extractText(data);
-  if (!analysis.trim()) return emptyAnalysisResponse(label, data);
-  return rememberUsage(
-    json({ analysis, provider: "Gemini", model }),
-    { model, ...usageFromProviderPayload(data), ok: true },
-  );
+  if (!analysis.trim()) {
+    console.warn(`[ai-vision][${label}] empty analysis text`, { keys: Object.keys(data || {}) });
+    return { ok: false, error: "EMPTY_RESPONSE" };
+  }
+  const usage = usageFromProviderPayload(data);
+  return {
+    ok: true,
+    text: analysis,
+    provider,
+    model,
+    ...usage,
+  };
 }
 
 async function refundRateLimit(admin: SupabaseClient, userId: string): Promise<void> {
@@ -578,18 +632,6 @@ async function refundRateLimit(admin: SupabaseClient, userId: string): Promise<v
   } catch (e) {
     console.warn("[ai-vision-proxy] ai_rate_limit_refund exception:", e);
   }
-}
-
-async function shouldRefundQuotaForResponse(resp: Response): Promise<boolean> {
-  if (resp.status === 503) {
-    try {
-      const data = await resp.clone().json();
-      return data?.error === "UPSTREAM_BUSY";
-    } catch {
-      return true;
-    }
-  }
-  return resp.status >= 500;
 }
 
 type QueueLeaseResult =
@@ -917,15 +959,220 @@ function usageFromProviderPayload(data: any): Pick<UsageBits, "prompt_tokens" | 
   return {};
 }
 
-const usageByResponse = new WeakMap<Response, UsageBits>();
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-function rememberUsage(resp: Response, bits: UsageBits): Response {
-  usageByResponse.set(resp, bits);
-  return resp;
+function parseJobId(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const s = raw.trim();
+  return UUID_RE.test(s) ? s : null;
 }
 
-/** Set for the current POST; vision/text completions honor it. Voice stays JSON. */
-let requestWantsStream = false;
+type JobRow = {
+  job_id: string;
+  user_id: string;
+  route: string;
+  status: string;
+  analysis: string | null;
+  provider: string | null;
+  model: string | null;
+  transcription: string | null;
+  error: string | null;
+  retry_after_seconds: number | null;
+  latitude: number | null;
+  longitude: number | null;
+  accuracy_m: number | null;
+  created_at: string;
+  updated_at: string;
+  finished_at: string | null;
+};
+
+function locationFieldsFromBody(body: Record<string, unknown>): {
+  latitude: number | null;
+  longitude: number | null;
+  accuracy_m: number | null;
+} {
+  const loc = body.locationContext as { latitude?: unknown; longitude?: unknown; accuracyMeters?: unknown } | undefined;
+  if (!loc || !isValidLatLng(loc.latitude, loc.longitude)) {
+    return { latitude: null, longitude: null, accuracy_m: null };
+  }
+  const acc = typeof loc.accuracyMeters === "number" && Number.isFinite(loc.accuracyMeters)
+    ? loc.accuracyMeters
+    : null;
+  return {
+    latitude: blurGpsCoordinate(loc.latitude as number),
+    longitude: blurGpsCoordinate(loc.longitude as number),
+    accuracy_m: acc,
+  };
+}
+
+function jobPayloadFromRow(row: JobRow): Record<string, unknown> {
+  return {
+    jobId: row.job_id,
+    status: row.status,
+    analysis: row.analysis ?? "",
+    provider: row.provider ?? undefined,
+    model: row.model ?? undefined,
+    transcription: row.transcription ?? undefined,
+    error: row.error ?? undefined,
+    retry_after_seconds: row.retry_after_seconds ?? undefined,
+  };
+}
+
+function httpStatusForJob(row: JobRow): number {
+  if (row.status === "running") return 202;
+  return 200;
+}
+
+async function fetchJobForUser(
+  admin: SupabaseClient,
+  jobId: string,
+  userId: string,
+): Promise<JobRow | null> {
+  const { data, error } = await admin
+    .from("ai_jobs")
+    .select("*")
+    .eq("job_id", jobId)
+    .eq("user_id", userId)
+    .maybeSingle();
+  if (error) {
+    console.warn("[ai-vision-proxy] fetchJobForUser", error);
+    return null;
+  }
+  return data as JobRow | null;
+}
+
+async function markStaleRunningJobFailed(
+  admin: SupabaseClient,
+  row: JobRow,
+  userId: string,
+): Promise<JobRow> {
+  const staleMs = jobMaxMs() + 20_000;
+  if (row.status !== "running") return row;
+  const updatedAt = new Date(row.updated_at).getTime();
+  if (Date.now() - updatedAt <= staleMs) return row;
+  await admin
+    .from("ai_jobs")
+    .update({
+      status: "failed",
+      error: "UPSTREAM_BUSY",
+      retry_after_seconds: 15,
+      finished_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
+    .eq("job_id", row.job_id)
+    .eq("user_id", userId)
+    .eq("status", "running");
+  await refundRateLimit(admin, userId);
+  return {
+    ...row,
+    status: "failed",
+    error: "UPSTREAM_BUSY",
+    retry_after_seconds: 15,
+  };
+}
+
+async function runJob(
+  admin: SupabaseClient,
+  jobId: string,
+  userId: string,
+  body: Record<string, unknown>,
+  cloudCfg: AppConfigCloudState,
+  leaseId: string,
+  ip: string,
+  routeHint: string,
+): Promise<void> {
+  const startedAt = Date.now();
+  const providerEnv = Deno.env.get("AI_PROVIDER") || "qwen";
+  const usageRoute = routeHint === "analysis" ? "analysis" : routeHint;
+  let lastPartialWrite = 0;
+  const onDelta = (full: string) => {
+    const now = Date.now();
+    if (now - lastPartialWrite < 800) return;
+    lastPartialWrite = now;
+    void admin
+      .from("ai_jobs")
+      .update({ analysis: full, updated_at: new Date().toISOString() })
+      .eq("job_id", jobId)
+      .eq("user_id", userId)
+      .eq("status", "running")
+      .then(({ error }) => {
+        if (error) console.warn("[ai-vision-proxy] partial job update", error);
+      });
+  };
+
+  try {
+    const result = await executeAnalysis(body, cloudCfg, onDelta);
+    if ("configError" in result) {
+      await admin
+        .from("ai_jobs")
+        .update({
+          status: "failed",
+          error: "PROVIDER_CONFIG",
+          finished_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        })
+        .eq("job_id", jobId)
+        .eq("user_id", userId);
+      await refundRateLimit(admin, userId);
+      return;
+    }
+    if (!result.ok) {
+      await admin
+        .from("ai_jobs")
+        .update({
+          status: "failed",
+          error: result.error,
+          retry_after_seconds: result.retryAfter ?? null,
+          finished_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        })
+        .eq("job_id", jobId)
+        .eq("user_id", userId);
+      if (result.error === "UPSTREAM_BUSY") {
+        await refundRateLimit(admin, userId);
+      }
+      return;
+    }
+    await admin
+      .from("ai_jobs")
+      .update({
+        status: "done",
+        analysis: result.text,
+        provider: result.provider,
+        model: result.model,
+        transcription: result.transcription ?? null,
+        error: null,
+        finished_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("job_id", jobId)
+      .eq("user_id", userId);
+    recordAiUsage(admin, userId, usageRoute, providerEnv, ip, {
+      model: result.model,
+      prompt_tokens: result.prompt_tokens ?? null,
+      completion_tokens: result.completion_tokens ?? null,
+      latency_ms: Date.now() - startedAt,
+      status: "ok",
+    });
+  } catch (e) {
+    console.error("[ai-vision-proxy] runJob failed", e);
+    await admin
+      .from("ai_jobs")
+      .update({
+        status: "failed",
+        error: "UPSTREAM_BUSY",
+        retry_after_seconds: 15,
+        finished_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("job_id", jobId)
+      .eq("user_id", userId);
+    await refundRateLimit(admin, userId);
+  } finally {
+    await releaseQueue(admin, leaseId);
+  }
+}
 
 /** 成功调用 AI 后异步记录一行 ai_usage（滑动窗口依据；A12 附带 model/tokens/latency/status） */
 function recordAiUsage(
@@ -982,7 +1229,23 @@ Deno.serve(async (req: Request) => {
       });
     }
 
-    // POST / — Main analysis endpoint（鉴权 + 限流；网关 verify_jwt=true）
+    // GET /result?jobId= — poll async job (short request; survives VPN drops)
+    if (route === "/result" && method === "GET") {
+      const admin = adminClient();
+      const jwt = extractUserJwt(req);
+      if (!jwt) return errResp("unauthorized", 401);
+      const userId = await getAuthUserId(jwt);
+      if (!userId) return errResp("unauthorized", 401);
+      const url = new URL(req.url);
+      const jobId = parseJobId(url.searchParams.get("jobId"));
+      if (!jobId) return json({ error: "BAD_JOB_ID" }, 400);
+      let row = await fetchJobForUser(admin, jobId, userId);
+      if (!row) return errResp("not found", 404);
+      row = await markStaleRunningJobFailed(admin, row, userId);
+      return json(jobPayloadFromRow(row), httpStatusForJob(row));
+    }
+
+    // POST / — Main analysis endpoint（鉴权 + 限流；async job when jobId present）
     if ((route === "/" || route === "") && method === "POST") {
       const admin = adminClient();
       const cloudCfg = await getAppConfigCloudCache(admin);
@@ -1016,6 +1279,73 @@ Deno.serve(async (req: Request) => {
       }
 
       const routeHint = routeHintFromBody(body);
+      const jobId = parseJobId(body.jobId);
+      const ip = getClientIp(req);
+
+      // Legacy clients without jobId: synchronous JSON response (no streaming)
+      if (!jobId) {
+        const lease = await tryAcquireQueue(admin, userId, routeHint, cloudCfg);
+        if (!lease.ok) {
+          return json(
+            {
+              error: "QUEUE",
+              retry_after_seconds: lease.retryAfter,
+              queue_depth: lease.queueDepth ?? null,
+            },
+            429,
+          );
+        }
+        try {
+          const gate = await enforceRateLimit(admin, userId);
+          if (!gate.ok) {
+            return json(
+              { error: gate.code, retry_after_seconds: gate.retryAfter ?? null },
+              429,
+            );
+          }
+          const startedAt = Date.now();
+          const result = await executeAnalysis(body, cloudCfg);
+          if ("configError" in result) {
+            await refundRateLimit(admin, userId);
+            return errResp(result.configError, 500);
+          }
+          if (!result.ok) {
+            await refundRateLimit(admin, userId);
+            if (result.error === "PROVIDER_AUTH" || result.error === "PROVIDER_CONFIG") {
+              return json({ error: result.error }, 502);
+            }
+            if (result.error === "EMPTY_RESPONSE") {
+              return json({ error: "EMPTY_RESPONSE" }, 502);
+            }
+            return json(
+              { error: "UPSTREAM_BUSY", retry_after_seconds: result.retryAfter ?? 15 },
+              503,
+            );
+          }
+          const usageRoute = routeHint === "analysis" ? "analysis" : routeHint;
+          recordAiUsage(admin, userId, usageRoute, Deno.env.get("AI_PROVIDER") || "qwen", ip, {
+            model: result.model,
+            prompt_tokens: result.prompt_tokens ?? null,
+            completion_tokens: result.completion_tokens ?? null,
+            latency_ms: Date.now() - startedAt,
+            status: "ok",
+          });
+          return json({
+            analysis: result.text,
+            provider: result.provider,
+            model: result.model,
+            transcription: result.transcription,
+          });
+        } finally {
+          await releaseQueue(admin, lease.leaseId);
+        }
+      }
+
+      const existing = await fetchJobForUser(admin, jobId, userId);
+      if (existing) {
+        const row = await markStaleRunningJobFailed(admin, existing, userId);
+        return json(jobPayloadFromRow(row), httpStatusForJob(row));
+      }
 
       const lease = await tryAcquireQueue(admin, userId, routeHint, cloudCfg);
       if (!lease.ok) {
@@ -1029,55 +1359,49 @@ Deno.serve(async (req: Request) => {
         );
       }
 
-      let releasedByStream = false;
       try {
         const gate = await enforceRateLimit(admin, userId);
         if (!gate.ok) {
+          await releaseQueue(admin, lease.leaseId);
           return json(
             { error: gate.code, retry_after_seconds: gate.retryAfter ?? null },
             429,
           );
         }
 
-        const wantStream = (req.headers.get("accept") || "").includes("text/event-stream");
-        const startedAt = Date.now();
-        const resp = await handleAnalysis(body, cloudCfg, wantStream);
+        const loc = locationFieldsFromBody(body);
+        const { error: insertErr } = await admin.from("ai_jobs").insert({
+          job_id: jobId,
+          user_id: userId,
+          route: routeHint,
+          status: "running",
+          latitude: loc.latitude,
+          longitude: loc.longitude,
+          accuracy_m: loc.accuracy_m,
+        });
 
-        const provider = (Deno.env.get("AI_PROVIDER") || "qwen");
-        const ip = getClientIp(req);
-        const usageRoute = routeHint === "analysis" ? "analysis" : routeHint;
-        const ct = resp.headers.get("content-type") || "";
-        if (ct.includes("text/event-stream")) {
-          releasedByStream = true;
-          return attachStreamLifecycle(resp, async (ok) => {
+        if (insertErr) {
+          if (insertErr.code === "23505") {
             await releaseQueue(admin, lease.leaseId);
-            const bits = usageByResponse.get(resp);
-            if (ok) {
-              recordAiUsage(admin, userId, usageRoute, provider, ip, {
-                ...bits,
-                latency_ms: Date.now() - startedAt,
-                status: "ok",
-              });
-            } else {
-              await refundRateLimit(admin, userId);
+            await refundRateLimit(admin, userId);
+            const raced = await fetchJobForUser(admin, jobId, userId);
+            if (raced) {
+              return json(jobPayloadFromRow(raced), httpStatusForJob(raced));
             }
-          });
-        }
-
-        if (resp.status >= 200 && resp.status < 300) {
-          const bits = usageByResponse.get(resp);
-          recordAiUsage(admin, userId, usageRoute, provider, ip, {
-            ...bits,
-            latency_ms: Date.now() - startedAt,
-            status: "ok",
-          });
-        } else if (await shouldRefundQuotaForResponse(resp)) {
+          }
+          console.error("[ai-vision-proxy] ai_jobs insert", insertErr);
+          await releaseQueue(admin, lease.leaseId);
           await refundRateLimit(admin, userId);
+          return errResp("job insert failed", 500);
         }
 
-        return resp;
-      } finally {
-        if (!releasedByStream) await releaseQueue(admin, lease.leaseId);
+        waitUntil(
+          runJob(admin, jobId, userId, body, cloudCfg, lease.leaseId, ip, routeHint),
+        );
+        return json({ jobId, status: "running" }, 202);
+      } catch (e) {
+        await releaseQueue(admin, lease.leaseId);
+        throw e;
       }
     }
 
@@ -1092,31 +1416,32 @@ Deno.serve(async (req: Request) => {
 // Analysis Handler — Routes to the correct AI provider
 // ============================================================================
 
-async function handleAnalysis(body: any, cloudCfg: AppConfigCloudState, wantStream = false): Promise<Response> {
+async function executeAnalysis(
+  body: any,
+  cloudCfg: AppConfigCloudState,
+  onDelta?: (fullText: string) => void,
+): Promise<ProviderResult | { configError: string }> {
   const cfg = getAIConfig(cloudCfg.modelId, body.modelId);
 
-  requestWantsStream = wantStream === true && !body.voiceFollowUp;
-
   if (!cfg.apiKey) {
-    return errResp(
-      `AI provider '${cfg.provider}' not configured. Set AI_API_KEY in Edge Function secrets.`,
-      500,
-    );
+    return {
+      configError:
+        `AI provider '${cfg.provider}' not configured. Set AI_API_KEY in Edge Function secrets.`,
+    };
   }
 
   const dbPrompt = cloudCfg.systemPrompt;
 
-  // Determine request type
   if (body.voiceFollowUp) {
-    return await handleVoiceFollowUp(cfg, body, dbPrompt);
+    return await handleVoiceFollowUp(cfg, body, dbPrompt, onDelta);
   }
   if (body.followUp && body.image) {
-    return await handleFollowUpWithImage(cfg, body, dbPrompt);
+    return await handleFollowUpWithImage(cfg, body, dbPrompt, onDelta);
   }
   if (body.followUp) {
-    return await handleTextFollowUp(cfg, body, dbPrompt);
+    return await handleTextFollowUp(cfg, body, dbPrompt, onDelta);
   }
-  return await handleImageAnalysis(cfg, body, dbPrompt);
+  return await handleImageAnalysis(cfg, body, dbPrompt, onDelta);
 }
 
 // ============================================================================
@@ -1127,11 +1452,12 @@ async function handleImageAnalysis(
   cfg: AIConfig,
   body: any,
   dbPrompt: string,
-): Promise<Response> {
+  onDelta?: (fullText: string) => void,
+): Promise<ProviderResult | { configError: string }> {
   const { image, detections, systemPrompt, maxTokens, uiLanguage } = body;
 
   if (!image) {
-    return errResp("Missing 'image' field (base64 image data)");
+    return { ok: false, error: "PROVIDER_CONFIG" };
   }
 
   // Build context from on-device detections
@@ -1156,13 +1482,13 @@ async function handleImageAnalysis(
 
   switch (cfg.provider) {
     case "qwen":
-      return await callQwen(cfg, systemMsg, userPrompt, image, tokenLimit);
+      return await callQwen(cfg, systemMsg, userPrompt, image, tokenLimit, onDelta);
     case "gemini":
-      return await callGemini(cfg, systemMsg, userPrompt, image, tokenLimit);
+      return await callGemini(cfg, systemMsg, userPrompt, image, tokenLimit, onDelta);
     case "openai":
-      return await callOpenAI(cfg, systemMsg, userPrompt, image, tokenLimit);
+      return await callOpenAI(cfg, systemMsg, userPrompt, image, tokenLimit, onDelta);
     default:
-      return errResp(`Unsupported provider: ${cfg.provider}`);
+      return { ok: false, error: "PROVIDER_CONFIG" };
   }
 }
 
@@ -1174,11 +1500,12 @@ async function handleTextFollowUp(
   cfg: AIConfig,
   body: any,
   dbPrompt: string,
-): Promise<Response> {
+  onDelta?: (fullText: string) => void,
+): Promise<ProviderResult | { configError: string }> {
   const { userMessage, previousAnalysis, systemPrompt, maxTokens, uiLanguage, history } = body;
 
   if (!userMessage) {
-    return errResp("Missing 'userMessage'");
+    return { ok: false, error: "PROVIDER_CONFIG" };
   }
 
   const defaultFollow =
@@ -1196,13 +1523,13 @@ async function handleTextFollowUp(
 
   switch (cfg.provider) {
     case "qwen":
-      return await callQwenText(cfg, messages, tokenLimit);
+      return await callQwenText(cfg, messages, tokenLimit, onDelta);
     case "gemini":
-      return await callGeminiText(cfg, messages, tokenLimit);
+      return await callGeminiText(cfg, messages, tokenLimit, onDelta);
     case "openai":
-      return await callOpenAIText(cfg, messages, tokenLimit);
+      return await callOpenAIText(cfg, messages, tokenLimit, onDelta);
     default:
-      return errResp(`Unsupported provider: ${cfg.provider}`);
+      return { ok: false, error: "PROVIDER_CONFIG" };
   }
 }
 
@@ -1214,14 +1541,15 @@ async function handleFollowUpWithImage(
   cfg: AIConfig,
   body: any,
   dbPrompt: string,
-): Promise<Response> {
+  onDelta?: (fullText: string) => void,
+): Promise<ProviderResult | { configError: string }> {
   const { image, userMessage, previousAnalysis, systemPrompt, maxTokens, uiLanguage, history } = body;
 
   if (!image) {
-    return errResp("Missing 'image' field (base64 image data)");
+    return { ok: false, error: "PROVIDER_CONFIG" };
   }
   if (!userMessage) {
-    return errResp("Missing 'userMessage'");
+    return { ok: false, error: "PROVIDER_CONFIG" };
   }
 
   const defaultFollowImage =
@@ -1243,13 +1571,13 @@ async function handleFollowUpWithImage(
 
   switch (cfg.provider) {
     case "qwen":
-      return await callQwen(cfg, systemMsg, userPrompt, image, tokenLimit);
+      return await callQwen(cfg, systemMsg, userPrompt, image, tokenLimit, onDelta);
     case "gemini":
-      return await callGemini(cfg, systemMsg, userPrompt, image, tokenLimit);
+      return await callGemini(cfg, systemMsg, userPrompt, image, tokenLimit, onDelta);
     case "openai":
-      return await callOpenAI(cfg, systemMsg, userPrompt, image, tokenLimit);
+      return await callOpenAI(cfg, systemMsg, userPrompt, image, tokenLimit, onDelta);
     default:
-      return errResp(`Unsupported provider: ${cfg.provider}`);
+      return { ok: false, error: "PROVIDER_CONFIG" };
   }
 }
 
@@ -1261,11 +1589,12 @@ async function handleVoiceFollowUp(
   cfg: AIConfig,
   body: any,
   dbPrompt: string,
-): Promise<Response> {
+  _onDelta?: (fullText: string) => void,
+): Promise<ProviderResult | { configError: string }> {
   const { audio, previousAnalysis, systemPrompt, maxTokens, uiLanguage, history } = body;
 
   if (!audio) {
-    return errResp("Missing 'audio' field (base64 audio data)");
+    return { ok: false, error: "PROVIDER_CONFIG" };
   }
 
   // For providers that support native audio input (Gemini, GPT-4o-audio),
@@ -1311,7 +1640,7 @@ async function handleVoiceFollowUp(
         history,
       ), tokenLimit);
     default:
-      return errResp(`Unsupported provider: ${cfg.provider}`);
+      return { ok: false, error: "PROVIDER_CONFIG" };
   }
 }
 
@@ -1376,18 +1705,6 @@ function extractText(data: any): string {
   return textFromParts(data.text) || textFromParts(data.content);
 }
 
-/** 2xx from the provider but no text — log the shape (never the image) and refund via 502. */
-function emptyAnalysisResponse(label: string, data: unknown): Response {
-  const d = (data && typeof data === "object" ? data : {}) as Record<string, any>;
-  console.warn(`[ai-vision][${label}] empty analysis text`, {
-    keys: Object.keys(d),
-    finish_reason: d.choices?.[0]?.finish_reason ?? d.candidates?.[0]?.finishReason ?? null,
-    prompt_feedback: d.promptFeedback ?? null,
-    error: d.error ?? null,
-  });
-  return json({ error: "EMPTY_RESPONSE" }, 502);
-}
-
 // ============================================================================
 // Qwen / DashScope (OpenAI-compatible mode)
 // ============================================================================
@@ -1400,7 +1717,8 @@ async function callQwen(
   userPrompt: string,
   imageBase64: string,
   maxTokens: number,
-): Promise<Response> {
+  onDelta?: (fullText: string) => void,
+): Promise<ProviderResult> {
   const url = `${cfg.baseUrl}/chat/completions`;
 
   // Clean base64 — DashScope accepts data URL format
@@ -1408,7 +1726,7 @@ async function callQwen(
     ? imageBase64
     : `data:image/jpeg;base64,${imageBase64}`;
 
-  return await completeOpenAiStyle("Qwen", url, {
+  return await completeOpenAiStyleResult("Qwen", url, {
     model: cfg.modelId,
     messages: [
       { role: "system", content: systemMsg },
@@ -1421,21 +1739,22 @@ async function callQwen(
       },
     ],
     max_tokens: maxTokens,
-  }, cfg.apiKey, "通义千问", cfg.modelId);
+  }, cfg.apiKey, "通义千问", cfg.modelId, onDelta);
 }
 
 async function callQwenText(
   cfg: AIConfig,
   messages: { role: string; content: any }[],
   maxTokens: number,
-): Promise<Response> {
+  onDelta?: (fullText: string) => void,
+): Promise<ProviderResult> {
   const url = `${cfg.baseUrl}/chat/completions`;
 
-  return await completeOpenAiStyle("Qwen", url, {
+  return await completeOpenAiStyleResult("Qwen", url, {
     model: cfg.modelId.replace("-vl-", "-"), // Use text model for follow-ups
     messages,
     max_tokens: maxTokens,
-  }, cfg.apiKey, "通义千问", cfg.modelId);
+  }, cfg.apiKey, "通义千问", cfg.modelId, onDelta);
 }
 
 // ============================================================================
@@ -1450,13 +1769,14 @@ async function callGemini(
   userPrompt: string,
   imageBase64: string,
   maxTokens: number,
-): Promise<Response> {
+  onDelta?: (fullText: string) => void,
+): Promise<ProviderResult> {
   const model = cfg.modelId;
   const cleanBase64 = imageBase64.replace(/^data:image\/[^;]+;base64,/, "");
   const mimeMatch = imageBase64.match(/^data:(image\/[^;]+);base64,/);
   const mimeType = mimeMatch ? mimeMatch[1] : "image/jpeg";
 
-  return await completeGeminiStyle("Gemini", cfg.baseUrl, model, cfg.apiKey, {
+  return await completeGeminiStyleResult("Gemini", cfg.baseUrl, model, cfg.apiKey, {
     system_instruction: { parts: [{ text: systemMsg }] },
     contents: [
       {
@@ -1467,14 +1787,15 @@ async function callGemini(
       },
     ],
     generationConfig: { maxOutputTokens: maxTokens },
-  });
+  }, onDelta);
 }
 
 async function callGeminiText(
   cfg: AIConfig,
   messages: { role: string; content: string }[],
   maxTokens: number,
-): Promise<Response> {
+  onDelta?: (fullText: string) => void,
+): Promise<ProviderResult> {
   const model = cfg.modelId;
   const systemInstruction = messages.find((m) => m.role === "system")?.content || "";
   const contents = messages
@@ -1484,11 +1805,11 @@ async function callGeminiText(
       parts: [{ text: m.content }],
     }));
 
-  return await completeGeminiStyle("Gemini", cfg.baseUrl, model, cfg.apiKey, {
+  return await completeGeminiStyleResult("Gemini", cfg.baseUrl, model, cfg.apiKey, {
     system_instruction: { parts: [{ text: systemInstruction }] },
     contents,
     generationConfig: { maxOutputTokens: maxTokens },
-  });
+  }, onDelta);
 }
 
 async function callGeminiAudio(
@@ -1498,7 +1819,7 @@ async function callGeminiAudio(
   audioBase64: string,
   mimeType: string,
   maxTokens: number,
-): Promise<Response> {
+): Promise<ProviderResult> {
   const model = cfg.modelId;
   const url = `${cfg.baseUrl}/models/${model}:generateContent`;
 
@@ -1517,14 +1838,19 @@ async function callGeminiAudio(
       contents: [{ parts }],
       generationConfig: { maxOutputTokens: maxTokens },
     }),
-  });
-  if (!res.ok) return res;
+  }, "json");
+  if (!res.ok) return providerResultFromHttpResponse(res);
 
   const data = await res.json();
-  return rememberUsage(
-    json({ analysis: extractText(data), provider: "Gemini", model }),
-    { model, ...usageFromProviderPayload(data), ok: true },
-  );
+  const analysis = extractText(data);
+  if (!analysis.trim()) return { ok: false, error: "EMPTY_RESPONSE" };
+  return {
+    ok: true,
+    text: analysis,
+    provider: "Gemini",
+    model,
+    ...usageFromProviderPayload(data),
+  };
 }
 
 // ============================================================================
@@ -1539,7 +1865,8 @@ async function callOpenAI(
   userPrompt: string,
   imageBase64: string,
   maxTokens: number,
-): Promise<Response> {
+  onDelta?: (fullText: string) => void,
+): Promise<ProviderResult> {
   const url = `${cfg.baseUrl}/chat/completions`;
 
   // Ensure proper data URL format
@@ -1547,7 +1874,7 @@ async function callOpenAI(
     ? imageBase64
     : `data:image/jpeg;base64,${imageBase64}`;
 
-  return await completeOpenAiStyle("OpenAI", url, {
+  return await completeOpenAiStyleResult("OpenAI", url, {
     model: cfg.modelId,
     messages: [
       { role: "system", content: systemMsg },
@@ -1560,21 +1887,22 @@ async function callOpenAI(
       },
     ],
     max_tokens: maxTokens,
-  }, cfg.apiKey, "OpenAI", cfg.modelId);
+  }, cfg.apiKey, "OpenAI", cfg.modelId, onDelta);
 }
 
 async function callOpenAIText(
   cfg: AIConfig,
   messages: { role: string; content: string }[],
   maxTokens: number,
-): Promise<Response> {
+  onDelta?: (fullText: string) => void,
+): Promise<ProviderResult> {
   const url = `${cfg.baseUrl}/chat/completions`;
 
-  return await completeOpenAiStyle("OpenAI", url, {
+  return await completeOpenAiStyleResult("OpenAI", url, {
     model: cfg.modelId,
     messages,
     max_tokens: maxTokens,
-  }, cfg.apiKey, "OpenAI", cfg.modelId);
+  }, cfg.apiKey, "OpenAI", cfg.modelId, onDelta);
 }
 
 async function callOpenAIAudio(
@@ -1583,7 +1911,7 @@ async function callOpenAIAudio(
   previousAnalysis: string | undefined,
   audioBase64: string,
   maxTokens: number,
-): Promise<Response> {
+): Promise<ProviderResult> {
   // GPT-4o supports audio via input_audio in the content array
   const url = `${cfg.baseUrl}/chat/completions`;
 
@@ -1616,7 +1944,7 @@ async function callOpenAIAudio(
     });
   } catch (e) {
     console.error("[ai-vision][OpenAI] Audio fetch failed", e);
-    return upstreamBusyResponse(15);
+    return { ok: false, error: "UPSTREAM_BUSY", retryAfter: 15 };
   }
 
   if (res.status === 400) {
@@ -1626,11 +1954,16 @@ async function callOpenAIAudio(
       { role: "user", content: "[User sent a voice message. Audio transcription is not available. Please ask the user to type their question.]" },
     ], maxTokens);
   }
-  if (!res.ok) return await providerErrorResponse(res, "OpenAI");
+  if (!res.ok) return providerResultFromHttpResponse(res);
 
   const data = await res.json();
-  return rememberUsage(
-    json({ analysis: extractText(data), provider: "OpenAI", model: cfg.modelId }),
-    { model: cfg.modelId, ...usageFromProviderPayload(data), ok: true },
-  );
+  const analysis = extractText(data);
+  if (!analysis.trim()) return { ok: false, error: "EMPTY_RESPONSE" };
+  return {
+    ok: true,
+    text: analysis,
+    provider: "OpenAI",
+    model: cfg.modelId,
+    ...usageFromProviderPayload(data),
+  };
 }

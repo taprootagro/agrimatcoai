@@ -37,6 +37,7 @@ const SupabaseTab = React.lazy(() => import("./cms/SupabaseTab"));
 const LoginConfigTab = React.lazy(() => import("./cms/LoginConfigTab"));
 const PushProvidersTab = React.lazy(() => import("./cms/PushProvidersTab"));
 const UserRolesTab = React.lazy(() => import("./cms/UserRolesTab"));
+const AiScanRecordsTab = React.lazy(() => import("./cms/AiScanRecordsTab"));
 
 const cmsTabFallback = (
   <div className="py-10 flex justify-center"><Loader2 className="w-5 h-5 animate-spin text-gray-400" /></div>
@@ -190,7 +191,7 @@ export default function ConfigManagerPage() {
     return () => cancelAnimationFrame(raf);
   }, []);
 
-  const [activeTab, setActiveTab] = useState<"supabase" | "banners" | "live" | "articles" | "market" | "filing" | "aboutUs" | "privacy" | "terms" | "technicalSupport" | "appBranding" | "splashScreen" | "homeIcons" | "chatContact" | "desktopIcon" | "aiModel" | "backendProxy" | "loginConfig" | "pushProviders" | "pushNotification" | "userRoles">("banners");
+  const [activeTab, setActiveTab] = useState<"supabase" | "banners" | "live" | "articles" | "market" | "filing" | "aboutUs" | "privacy" | "terms" | "technicalSupport" | "appBranding" | "splashScreen" | "homeIcons" | "chatContact" | "desktopIcon" | "aiModel" | "aiRecords" | "backendProxy" | "loginConfig" | "pushProviders" | "pushNotification" | "userRoles">("banners");
   const [pushSendStatus, setPushSendStatus] = useState<"idle" | "sending" | "done">("idle");
   const [pushSendResult, setPushSendResult] = useState<{ sent: number; total: number; errors: number; results: string[] } | null>(null);
   const [pushForm, setPushForm] = useState({ title: "", body: "", url: "" });
@@ -559,6 +560,7 @@ export default function ConfigManagerPage() {
       // aiModel tab 使用直接表单渲染（aiModelConfig + cloudAIConfig），不走卡片网格
       case "pushNotification": return [];
       case "userRoles": return [];
+      case "aiRecords": return [];
       default: return [];
     }
   };
@@ -1923,6 +1925,7 @@ export default function ConfigManagerPage() {
       case "backendProxy": return ct("navItems.imBackend", "IM后端代理", "IM Backend Proxy");
       case "pushProviders": return ct("messages.push_services", "推送服务", "Push Services");
       case "pushNotification": return ct("navItems.pushNotification", "发送通知", "Push Notification");
+      case "aiRecords": return ct("navItems.aiRecords", "识别记录", "Scan records");
       case "userRoles": return ct("navItems.userRoles", "用户与角色", "Users & roles");
       default: return "";
     }
@@ -2087,6 +2090,7 @@ export default function ConfigManagerPage() {
               ]},
               { id: 'ai', label: ct("sidebar.aiConfig", "AI 配置", "AI Config"), items: [
                 { key: 'aiModel', label: ct("navItems.aiModel", "AI模型", "AI Model") },
+                { key: 'aiRecords', label: ct("navItems.aiRecords", "识别记录", "Scan records") },
               ]},
               { id: 'auth', label: ct("sidebar.auth", "认证配置", "Auth"), items: [
                 { key: 'loginConfig', label: ct("navItems.loginConfig", "登录配置", "Login") },
@@ -2139,7 +2143,7 @@ export default function ConfigManagerPage() {
       {/* 主内容区 - with header showing current tab name */}
       <div className="bg-white border-b border-gray-200 px-4 py-3 flex items-center justify-between sticky top-0 z-10">
         <h2 className="text-base text-gray-800">{getTabName(activeTab)}</h2>
-        {!["homeIcons", "desktopIcon", "aiModel", "backendProxy", "loginConfig", "pushProviders", "pushNotification", "supabase", "splashScreen", "market", "userRoles"].includes(activeTab) && (
+        {!["homeIcons", "desktopIcon", "aiModel", "aiRecords", "backendProxy", "loginConfig", "pushProviders", "pushNotification", "supabase", "splashScreen", "market", "userRoles"].includes(activeTab) && (
           <button
             onClick={() => handleAddItem(activeTab)}
             className="px-3 py-1.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors flex items-center gap-1.5 text-sm"
@@ -2701,6 +2705,10 @@ export default function ConfigManagerPage() {
         ) : activeTab === "userRoles" ? (
           <React.Suspense fallback={cmsTabFallback}>
             <UserRolesTab workingConfig={workingConfig} ct={ct} contentRole={contentRole} />
+          </React.Suspense>
+        ) : activeTab === "aiRecords" ? (
+          <React.Suspense fallback={cmsTabFallback}>
+            <AiScanRecordsTab workingConfig={workingConfig} ct={ct} />
           </React.Suspense>
         ) : activeTab === "chatContact" ? (
           <>
