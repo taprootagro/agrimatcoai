@@ -42,7 +42,8 @@ function ProfileQRCardInner({ onClose, userId, name }: ProfileQRCardProps) {
         {isFarmerLink && (
           <div className="px-4 pt-5 pb-1 text-center">
             <p className="text-xs text-gray-500 leading-relaxed">
-              {t.profile?.farmerQrHint ?? "门店可扫此码将您加入通讯录"}
+              {t.profile?.farmerQrHint ??
+                "账号标识码。绑定门店请在「农友圈子」扫门店绑定码，无需门店扫此码。"}
             </p>
           </div>
         )}

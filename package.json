@@ -14,6 +14,7 @@
     "test:ui": "vitest --ui",
     "verify:capacitor-parity": "node scripts/verify-capacitor-parity.mjs",
     "sync:app-config-seed": "node scripts/generate-seed-sql.mjs --write-init",
+    "pull:app-config-seed": "node scripts/pull-app-config-to-seed.mjs --write-init",
     "audit:i18n": "node scripts/audit-i18n.mjs",
     "i18n:cms-critical": "node scripts/apply-cms-i18n-critical.mjs"
   },

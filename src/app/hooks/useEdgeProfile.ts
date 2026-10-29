@@ -77,6 +77,7 @@ type InitialEdgeState = {
   contentSuperAdmin: boolean;
   contentRole: ContentRole;
   appRole: AppRole;
+  appRoleChosen: boolean;
   dbProfile: Record<string, unknown> | null;
   profileCompleted: boolean;
   displayName: string;
@@ -91,6 +92,7 @@ function initialEdgeProfileHookState(): InitialEdgeState {
     contentSuperAdmin: false,
     contentRole: "none",
     appRole: "farmer",
+    appRoleChosen: false,
     dbProfile: null,
     profileCompleted: false,
     displayName: "",
@@ -112,6 +114,7 @@ function initialEdgeProfileHookState(): InitialEdgeState {
       contentSuperAdmin: edge.contentSuperAdmin === true,
       contentRole: (edge.contentRole as ContentRole) || (edge.contentSuperAdmin ? "admin" : "none"),
       appRole: edge.appRole === "distributor" ? "distributor" : "farmer",
+      appRoleChosen: edge.appRoleChosen === true,
       dbProfile: edge.dbProfile,
       profileCompleted: edge.profileCompleted === true,
       displayName: typeof edge.displayName === "string" ? edge.displayName : "",
@@ -136,6 +139,7 @@ export function useEdgeProfile() {
   const [contentSuperAdmin, setContentSuperAdmin] = useState(init.contentSuperAdmin);
   const [contentRole, setContentRole] = useState<ContentRole>(init.contentRole);
   const [appRole, setAppRole] = useState<AppRole>(init.appRole);
+  const [appRoleChosen, setAppRoleChosen] = useState(init.appRoleChosen);
   const [dbProfile, setDbProfile] = useState<Record<string, unknown> | null>(
     init.dbProfile,
   );
@@ -160,6 +164,7 @@ export function useEdgeProfile() {
       setContentSuperAdmin(false);
       setContentRole("none");
       setAppRole("farmer");
+      setAppRoleChosen(false);
       setDbProfile(null);
       setProfileCompleted(false);
       setDisplayName("");
@@ -199,6 +204,7 @@ export function useEdgeProfile() {
         setContentSuperAdmin(false);
         setContentRole("none");
         setAppRole("farmer");
+        setAppRoleChosen(false);
         setDbProfile(null);
         setProfileCompleted(false);
         setDisplayName("");
@@ -220,6 +226,7 @@ export function useEdgeProfile() {
         setContentSuperAdmin(false);
         setContentRole("none");
         setAppRole("farmer");
+        setAppRoleChosen(false);
         setDbProfile(null);
         setProfileCompleted(false);
         setDisplayName("");
@@ -279,6 +286,7 @@ export function useEdgeProfile() {
       setContentSuperAdmin(isAdmin);
       setContentRole(newContentRole);
       setAppRole(role);
+      setAppRoleChosen(data.appRoleChosen === true);
       setDbProfile(parsedProfile);
       setProfileCompleted(data.profileCompleted === true);
       const dn = typeof data.displayName === "string" ? data.displayName : "";
@@ -295,6 +303,7 @@ export function useEdgeProfile() {
           contentSuperAdmin: isAdmin,
           contentRole: newContentRole,
           appRole: role,
+          appRoleChosen: data.appRoleChosen === true,
           profileCompleted: data.profileCompleted === true,
           displayName: dn,
           phone: ph,
@@ -377,6 +386,7 @@ export function useEdgeProfile() {
     contentSuperAdmin,
     contentRole,
     appRole,
+    appRoleChosen,
     dbProfile,
     profileCompleted,
     displayName,

@@ -22,6 +22,8 @@ interface MerchantBindActionSheetProps {
   setScanResult: (result: any) => void;
   confirmBindMerchant: () => void;
   handleQRScanResult: (text: string) => void;
+  /** Store shell: verified UI shows farmer peer instead of merchant. */
+  isStoreShell?: boolean;
 }
 
 export const MerchantBindActionSheet = React.memo(function MerchantBindActionSheet({
@@ -38,8 +40,12 @@ export const MerchantBindActionSheet = React.memo(function MerchantBindActionShe
   setScanResult,
   confirmBindMerchant,
   handleQRScanResult,
+  isStoreShell = false,
 }: MerchantBindActionSheetProps) {
   const { t } = useLanguage();
+  const verifiedPeer = isStoreShell
+    ? scanResult?.farmerData
+    : scanResult?.merchantData;
   return (
     <>
       {showScanner && (
@@ -67,7 +73,7 @@ export const MerchantBindActionSheet = React.memo(function MerchantBindActionShe
                 <p className="text-gray-700 font-medium">{t.community?.verifyingDomain || "Verifying domain..."}</p>
               </div>
             )}
-            {scanResult.status === "verified" && scanResult.merchantData && (
+            {scanResult.status === "verified" && verifiedPeer && (
               <div>
                 <div className="bg-gradient-to-br from-emerald-500 to-emerald-600 p-5 text-center">
                   <div className="w-14 h-14 mx-auto mb-2 bg-white/20 rounded-full flex items-center justify-center">
@@ -78,29 +84,39 @@ export const MerchantBindActionSheet = React.memo(function MerchantBindActionShe
                 </div>
                 <div className="p-5 space-y-3">
                   <div className="flex items-center gap-3">
-                    {scanResult.merchantData.avatar ? (
-                      <img src={scanResult.merchantData.avatar} alt="" className="w-12 h-12 rounded-full object-cover ring-2 ring-emerald-100" />
+                    {verifiedPeer.avatar ? (
+                      <img src={verifiedPeer.avatar} alt="" className="w-12 h-12 rounded-full object-cover ring-2 ring-emerald-100" />
                     ) : (
                       <div className="w-12 h-12 rounded-full bg-emerald-100 flex items-center justify-center text-emerald-700 font-semibold text-lg">
-                        {(scanResult.merchantData.name || "?").charAt(0)}
+                        {(verifiedPeer.name || "?").charAt(0)}
                       </div>
                     )}
                     <div className="flex-1 min-w-0">
-                      <p className="font-semibold text-gray-800 truncate">{scanResult.merchantData.name || scanResult.merchantData.merchantUserId.slice(0, 8)}</p>
+                      <p className="font-semibold text-gray-800 truncate">
+                        {verifiedPeer.name ||
+                          ("farmerUserId" in verifiedPeer
+                            ? verifiedPeer.farmerUserId
+                            : verifiedPeer.merchantUserId
+                          ).slice(0, 8)}
+                      </p>
                     </div>
                   </div>
                   <div className="bg-gray-50 rounded-xl p-3 space-y-1.5 text-xs">
                     <div className="flex justify-between gap-2">
                       <span className="text-gray-500 flex-shrink-0">{t.community?.channelIdLabel || "Channel ID"}</span>
-                      <span className="text-gray-800 font-mono text-right break-all">{scanResult.merchantData.channelId}</span>
+                      <span className="text-gray-800 font-mono text-right break-all">{verifiedPeer.channelId}</span>
                     </div>
                     <div className="flex justify-between gap-2">
                       <span className="text-gray-500 flex-shrink-0">{t.community?.imProviderLabel || "IM Provider"}</span>
-                      <span className="text-gray-800">{scanResult.merchantData.imProvider}</span>
+                      <span className="text-gray-800">{verifiedPeer.imProvider}</span>
                     </div>
                   </div>
                   <p className="text-[10px] text-amber-600 bg-amber-50 rounded-lg p-2">
-                    {t.community?.bindWarning || "Confirming will overwrite the current chat contact configuration."}
+                    {isStoreShell
+                      ? (t.community?.bindWarningStore ||
+                        "确认后将把该农户加入门店联系人列表。")
+                      : (t.community?.bindWarning ||
+                        "Confirming will overwrite the current chat contact configuration.")}
                   </p>
                 </div>
                 <div className="flex" style={{ boxShadow: '0 -1px 4px rgba(0,0,0,0.04)' }}>

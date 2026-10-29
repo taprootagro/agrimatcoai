@@ -1,24 +1,24 @@
 {
   "liveShareConfig": {
     "enabled": false,
+    "wxAppId": "",
     "shareUrl": "",
-    "shareTitle": "Agrimatco AI Live",
     "shareText": "",
+    "shareTitle": "Agrimatco AI Live",
     "shareImgUrl": "",
     "wxJsSdkEnabled": false,
-    "wxAppId": "",
     "wxSignatureApi": ""
   },
   "liveNavigationConfig": {
-    "enabled": false,
-    "latitude": "",
-    "longitude": "",
+    "waze": true,
     "address": "",
-    "coordSystem": "wgs84",
-    "baiduMap": true,
     "amapMap": true,
-    "googleMap": true,
+    "enabled": false,
+    "baiduMap": true,
+    "latitude": "",
     "appleMaps": true,
-    "waze": true
+    "googleMap": true,
+    "longitude": "",
+    "coordSystem": "wgs84"
   }
 }

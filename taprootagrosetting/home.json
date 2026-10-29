@@ -1,25 +1,25 @@
 {
   "banners": [
     {
+      "id": 3,
+      "alt": "demo",
+      "url": "content/0de7078e-b9e2-4f68-b0ee-c5aa4c4e7b82/1793256117731-_2026-10-29_14.41.48.webp",
+      "title": "demo",
+      "content": "<p>article demo</p><p></p><p>Embracing a green ecosystem, Agrimatco AI is dedicated to the development of sustainable agriculture, providing eco-friendly cultivation solutions.</p>"
+    },
+    {
       "id": 1,
       "alt": "demo",
-      "url": "https://cdn.topagro.com/demo/photo-1.jpeg",
+      "url": "content/0de7078e-b9e2-4f68-b0ee-c5aa4c4e7b82/1793255675479-team.webp",
       "title": "demo",
-      "content": "<p>article demo</p><p></p><p>探索现代农业的无限可能，从智能种植到精准管理，Agrimatco AI引领农业革命。</p><p></p><p>Explore the boundless possibilities of modern agriculture—from smart cultivation to precision management—as Agrimatco AI leads the agricultural revolution.</p>"
+      "content": "<p>article demo</p><p></p><p></p><p>Explore the boundless possibilities of modern agriculture—from smart cultivation to precision management—as Agrimatco AI leads the agricultural revolution.</p>"
     },
     {
       "id": 2,
       "alt": "demo",
-      "url": "https://cdn.topagro.com/demo/photo-3.jpeg",
+      "url": "content/0de7078e-b9e2-4f68-b0ee-c5aa4c4e7b82/1793255986795-_2026-10-29_14.39.32.webp",
       "title": "demo",
-      "content": "<p>article demo</p><p></p><p>见证丰收的喜悦，Agrimatco AI提供全面的农业解决方案，帮助您实现丰收。</p><p></p><p>Witness the joy of a bountiful harvest—Agrimatco AI provides comprehensive agricultural solutions to help you achieve a successful yield.</p>"
-    },
-    {
-      "id": 3,
-      "alt": "demo",
-      "url": "https://cdn.topagro.com/demo/photo-2.jpeg",
-      "title": "demo",
-      "content": "<p>article demo</p><p></p><p>拥抱绿色生态，Agrimatco AI致力于可持续农业发展，提供环保的种植方案。</p><p></p><p>Embracing a green ecosystem, Agrimatco AI is dedicated to the development of sustainable agriculture, providing eco-friendly cultivation solutions.</p>"
+      "content": "<p>article demo</p><p></p><p>Witness the joy of a bountiful harvest—Agrimatco AI provides comprehensive agricultural solutions to help you achieve a successful yield.</p>"
     }
   ],
   "navigation": [
@@ -51,12 +51,12 @@
   "liveStreams": [
     {
       "id": 1,
-      "title": "New products",
+      "title": "Meet agrimatco",
       "navWaze": false,
       "viewers": "1234",
-      "videoUrl": "https://cdn.topagro.com/demo/demo.mp4",
+      "videoUrl": "https://youtu.be/cSV5aIiI5Ek?si=3ZxKBwPOLWYpLagm",
       "shareText": "DEMO",
-      "thumbnail": "https://cdn.topagro.com/demo/photo-4.jpeg",
+      "thumbnail": "content/0de7078e-b9e2-4f68-b0ee-c5aa4c4e7b82/1793255254507-_2026-10-29_14.27.24.webp",
       "navAddress": "CBD",
       "navAmapMap": true,
       "navEnabled": false,
@@ -149,12 +149,12 @@
     "videoSources": []
   },
   "homeIcons": {
-    "aiAssistantIconUrl": "",
+    "liveBadge": "",
+    "liveTitle": "",
+    "liveCoverUrl": "",
+    "statementLabel": "",
     "aiAssistantLabel": "",
     "statementIconUrl": "",
-    "statementLabel": "",
-    "liveCoverUrl": "",
-    "liveTitle": "",
-    "liveBadge": ""
+    "aiAssistantIconUrl": ""
   }
 }

@@ -6,6 +6,7 @@ export type EdgeProfileCachePayload = {
   contentSuperAdmin: boolean;
   contentRole: string;
   appRole: "farmer" | "distributor";
+  appRoleChosen: boolean;
   profileCompleted: boolean;
   displayName: string;
   phone: string;

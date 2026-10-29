@@ -51,10 +51,18 @@ export function ProfilePage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const onboarding = searchParams.get("onboarding") === "1";
+  /**
+   * 仅 dev：进入「我的」自动打开编辑资料，并展示农民/商店（?pickRole=0 关闭自动弹层，仍点头像可编辑）。
+   * 生产构建无此行为。
+   */
+  const devOpenProfileEdit =
+    import.meta.env.DEV && searchParams.get("pickRole") !== "0";
+  const devForceRolePicker = import.meta.env.DEV;
   const { t } = useLanguage();
   const { config } = useConfigContext();
   const {
     appRole,
+    appRoleChosen,
     dbProfile,
     profileCompleted,
     displayName: edgeDisplayName,
@@ -83,6 +91,7 @@ export function ProfilePage() {
   const profileDetailDismissedRef = useRef(false);
   /** 仅当 profileCompleted 从 false→true 时自动关编辑层；若已为 true，用户点头像打开不应被立刻关掉。 */
   const profileCompletedPrevRef = useRef<boolean | undefined>(undefined);
+  const appRoleChosenPrevRef = useRef<boolean | undefined>(undefined);
 
   const userId = getUserId();
   /** 服务端账号登录时不得用出厂/模板 `config.userProfile` 兜底，否则会显示 chat.json 里的占位资料。 */
@@ -112,7 +121,7 @@ export function ProfilePage() {
     backendOk &&
     !profileLoading &&
     !profileError &&
-    !profileCompleted;
+    (!profileCompleted || !appRoleChosen);
 
   const headerName = serverBackedProfile
     ? (edgeDisplayName.trim() ||
@@ -160,7 +169,7 @@ export function ProfilePage() {
   }, [edgePickup, profileLoading]);
 
   useEffect(() => {
-    if (profileCompleted) {
+    if (profileCompleted && appRoleChosen) {
       profileDetailDismissedRef.current = false;
       try {
         sessionStorage.removeItem(PROFILE_GATE_DISMISSED_SESSION_KEY);
@@ -168,7 +177,29 @@ export function ProfilePage() {
         /* ignore */
       }
     }
-  }, [profileCompleted]);
+  }, [profileCompleted, appRoleChosen]);
+
+  const openDevProfileEdit = useCallback(() => {
+    if (!devOpenProfileEdit || !isUserLoggedIn()) return;
+    profileDetailDismissedRef.current = false;
+    try {
+      sessionStorage.removeItem(PROFILE_GATE_DISMISSED_SESSION_KEY);
+    } catch {
+      /* ignore */
+    }
+    setShowProfileDetail(true);
+  }, [devOpenProfileEdit]);
+
+  useEffect(() => {
+    if (!devOpenProfileEdit) return;
+    openDevProfileEdit();
+    const onAuth = () => {
+      setIsLoggedIn(isUserLoggedIn());
+      openDevProfileEdit();
+    };
+    window.addEventListener(TAPROOT_AUTH_CHANGE_EVENT, onAuth);
+    return () => window.removeEventListener(TAPROOT_AUTH_CHANGE_EVENT, onAuth);
+  }, [devOpenProfileEdit, openDevProfileEdit]);
 
   useEffect(() => {
     if (!isUserLoggedIn() || !gateIncomplete || profileLoading) return;
@@ -183,12 +214,15 @@ export function ProfilePage() {
   }, [gateIncomplete, profileLoading]);
 
   useEffect(() => {
-    const wasIncomplete = profileCompletedPrevRef.current === false;
+    const wasGated =
+      profileCompletedPrevRef.current === false ||
+      appRoleChosenPrevRef.current === false;
     profileCompletedPrevRef.current = profileCompleted;
-    if (profileCompleted && wasIncomplete && showProfileDetail) {
+    appRoleChosenPrevRef.current = appRoleChosen;
+    if (profileCompleted && appRoleChosen && wasGated && showProfileDetail) {
       setShowProfileDetail(false);
     }
-  }, [profileCompleted, showProfileDetail]);
+  }, [profileCompleted, appRoleChosen, showProfileDetail]);
 
   const onProfileDetailClose = useCallback(() => {
     profileDetailDismissedRef.current = true;
@@ -280,6 +314,11 @@ export function ProfilePage() {
               />
             </div>
             <p className="text-white/90 text-sm">{t.profile.loginPrompt}</p>
+            {import.meta.env.DEV ? (
+              <p className="text-white/75 text-xs mt-2 px-4 text-center leading-relaxed">
+                开发模式：登录后进入「我的」会自动打开编辑资料，可测试「农民 / 商店」（请用 npm run dev 的 5173，不是 preview 4173）。
+              </p>
+            ) : null}
           </div>
           <div className="bg-white rounded-3xl p-6 shadow-2xl text-center">
             <button
@@ -325,6 +364,9 @@ export function ProfilePage() {
           profileLoading={profileLoading}
           profileError={profileError}
           profileCompleted={profileCompleted}
+          appRole={appRole}
+          appRoleChosen={appRoleChosen}
+          forceRolePicker={devForceRolePicker}
           onRemoteProfileSaved={() => {
             queueMicrotask(() => {
               void refreshEdgeProfile({ background: true });

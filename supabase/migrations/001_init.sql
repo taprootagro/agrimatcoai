@@ -238,6 +238,12 @@ COMMENT ON COLUMN public.user_profiles.app_role IS
 
 GRANT USAGE ON TYPE public.user_app_role TO anon, authenticated, service_role;
 
+ALTER TABLE public.user_profiles
+  ADD COLUMN IF NOT EXISTS app_role_chosen BOOLEAN NOT NULL DEFAULT false;
+
+COMMENT ON COLUMN public.user_profiles.app_role_chosen IS
+  'True after user picks farmer/distributor once via POST /profile or ops assigns app_role. When false, client must send appRole on profile save.';
+
 -- ---------------------------------------------------------------------------
 -- user_profiles：展示资料拆列（昵称 / 手机 / 提货地址 ≤200 字符 / 头像 / 是否完善）
 -- 幂等：ADD COLUMN IF NOT EXISTS；回填仅当 profile JSON 有值时写入空列
@@ -291,6 +297,15 @@ SET profile_completed = (
   AND btrim(pickup_address) <> ''
   AND btrim(avatar_url) <> ''
 );
+
+UPDATE public.user_profiles
+SET app_role_chosen = true
+WHERE app_role_chosen = false
+  AND (
+    profile_completed = true
+    OR last_profile_post_at IS NOT NULL
+    OR app_role = 'distributor'::public.user_app_role
+  );
 
 ALTER TABLE user_profiles ENABLE ROW LEVEL SECURITY;
 

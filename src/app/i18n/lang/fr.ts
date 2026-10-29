@@ -148,7 +148,7 @@ const translations: Translations = {
       storeBindCardSubtitle:
         'Affichez ou créez le QR que les agriculteurs scannent pour se connecter à votre magasin',
       farmerQrHint:
-        'Les magasins scannent avec Scanner ; le domaine doit correspondre à la liste blanche.',
+        'Identifiant de compte pour vérification. Pour lier un magasin : Communauté → Scanner le QR magasin (/m/…). Les magasins ne scannent pas ce code.',
       title: 'Mon profil',
       myInfo: 'Mes informations',
       statistics: 'Statistiques',
@@ -205,6 +205,12 @@ const translations: Translations = {
       addPhoneHint: 'Appuyez pour ajouter un téléphone',
       completeProfileFirst:
         'Remplissez tous les champs et appuyez sur Enregistrer avant de fermer.',
+      appRoleLabel: 'Type de compte',
+      appRoleFarmer: 'Agriculteur',
+      appRoleStore: 'Magasin',
+      appRoleHintFirst: 'Choisissez une seule fois. Après l’enregistrement, vous ne pourrez plus modifier dans l’app ; contactez le support si besoin.',
+      appRoleLockedHint: 'Le type de compte est définitif et ne peut pas être modifié dans l’app. Contactez le support pour un changement.',
+      appRoleRequired: 'Choisissez Agriculteur ou Magasin avant d’enregistrer.',
       pickupAddressLabel: 'Adresse de retrait / livraison',
       pickupAddressLimit: 'Maximum {n} caractères.',
       avatarTooLarge: 'Image trop volumineuse. Choisissez une photo plus petite.',

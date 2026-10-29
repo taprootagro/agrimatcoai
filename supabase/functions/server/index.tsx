@@ -291,8 +291,16 @@ function parseAppRoleForAssign(raw: unknown): "farmer" | "distributor" | null {
   if (raw === undefined || raw === null) return null;
   const s = String(raw).trim().toLowerCase();
   if (!s) return null;
-  if (s === "farmer" || s === "农户" || s === "農戶") return "farmer";
-  if (s === "distributor" || s === "门店" || s === "分销商") return "distributor";
+  if (s === "farmer" || s === "农户" || s === "農戶" || s === "农民") return "farmer";
+  if (
+    s === "distributor" ||
+    s === "门店" ||
+    s === "分销商" ||
+    s === "商店" ||
+    s === "store"
+  ) {
+    return "distributor";
+  }
   return null;
 }
 
@@ -364,7 +372,10 @@ async function handlePostAdminUserRoles(
       updated_at: new Date().toISOString(),
     };
     if (cr !== null) patch.content_role = cr;
-    if (ar !== null) patch.app_role = ar;
+    if (ar !== null) {
+      patch.app_role = ar;
+      patch.app_role_chosen = true;
+    }
 
     const { data: existing, error: exErr } = await admin
       .from("user_profiles")
@@ -398,6 +409,7 @@ async function handlePostAdminUserRoles(
         profile_completed: false,
         content_role: (cr ?? "none") as string,
         app_role: (ar ?? "farmer") as string,
+        app_role_chosen: ar !== null,
         updated_at: patch.updated_at,
       };
       const { error: insErr } = await admin.from("user_profiles").insert(ins);
@@ -1848,7 +1860,7 @@ async function handleGetProfile(user: User): Promise<Response> {
   const { data, error } = await admin
     .from("user_profiles")
     .select(
-      "profile, updated_at, content_role, content_super_admin, app_role, display_name, phone, pickup_address, avatar_url, profile_completed",
+      "profile, updated_at, content_role, content_super_admin, app_role, app_role_chosen, display_name, phone, pickup_address, avatar_url, profile_completed",
     )
     .eq("user_id", userId)
     .maybeSingle();
@@ -1909,11 +1921,13 @@ async function handleGetProfile(user: User): Promise<Response> {
       profileCompleted: false,
       contentRole: "none",
       appRole: "farmer",
+      appRoleChosen: false,
     });
   }
 
   const appRole =
     data.app_role === "distributor" ? "distributor" : "farmer";
+  const appRoleChosen = data.app_role_chosen === true;
 
   const rawProf =
     data.profile && typeof data.profile === "object" && !Array.isArray(data.profile)
@@ -1940,6 +1954,7 @@ async function handleGetProfile(user: User): Promise<Response> {
     updatedAt: data.updated_at,
     contentRole: (data.content_role || "none"),
     appRole,
+    appRoleChosen,
   });
 }
 
@@ -2181,7 +2196,7 @@ async function handlePostProfile(
   const { data: row, error: readErr } = await admin
     .from("user_profiles")
     .select(
-      "profile, display_name, avatar_url, phone, pickup_address, profile_completed, last_profile_post_at",
+      "profile, display_name, avatar_url, phone, pickup_address, profile_completed, last_profile_post_at, app_role, app_role_chosen",
     )
     .eq("user_id", authenticatedUserId)
     .maybeSingle();
@@ -2189,6 +2204,18 @@ async function handlePostProfile(
   if (readErr) {
     console.error("[profile/POST] read:", readErr);
     return err(`Database error: ${readErr.message}`, 500);
+  }
+
+  const roleAlreadyChosen = row?.app_role_chosen === true;
+  let firstTimeAppRole: "farmer" | "distributor" | null = null;
+  if (!roleAlreadyChosen) {
+    firstTimeAppRole = parseAppRoleForAssign(body.appRole ?? body.app_role);
+    if (firstTimeAppRole === null) {
+      return err(
+        "appRole is required on first profile save (farmer or distributor)",
+        400,
+      );
+    }
   }
 
   const intervalSec = getProfilePostMinIntervalSeconds();
@@ -2283,18 +2310,24 @@ async function handlePostProfile(
   );
 
   const nowIso = new Date().toISOString();
+  const upsertPayload: Record<string, unknown> = {
+    user_id: authenticatedUserId,
+    profile: extras,
+    display_name,
+    avatar_url,
+    phone,
+    pickup_address,
+    profile_completed,
+    updated_at: nowIso,
+    last_profile_post_at: nowIso,
+  };
+  if (firstTimeAppRole !== null) {
+    upsertPayload.app_role = firstTimeAppRole;
+    upsertPayload.app_role_chosen = true;
+  }
+
   const { error } = await admin.from("user_profiles").upsert(
-    {
-      user_id: authenticatedUserId,
-      profile: extras,
-      display_name,
-      avatar_url,
-      phone,
-      pickup_address,
-      profile_completed,
-      updated_at: nowIso,
-      last_profile_post_at: nowIso,
-    },
+    upsertPayload,
     { onConflict: "user_id" },
   );
 
@@ -2303,7 +2336,12 @@ async function handlePostProfile(
     return err(`Database error: ${error.message}`, 500);
   }
 
-  return json({ success: true, profileCompleted: profile_completed });
+  return json({
+    success: true,
+    profileCompleted: profile_completed,
+    appRole: firstTimeAppRole ?? undefined,
+    appRoleChosen: firstTimeAppRole !== null ? true : roleAlreadyChosen,
+  });
 }
 
 // ============================================================================

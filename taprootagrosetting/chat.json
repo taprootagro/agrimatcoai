@@ -1,23 +1,23 @@
 {
   "communityUiMode": "store",
   "chatContact": {
-    "merchantUserId": "",
-    "channelId": "",
     "name": "",
-    "avatar": "",
-    "subtitle": "",
-    "verifiedDomains": [],
-    "boundAt": 0,
-    "boundFrom": "",
     "phone": "",
+    "avatar": "",
+    "boundAt": 0,
     "storeId": "",
     "imUserId": "",
-    "imProvider": ""
+    "subtitle": "",
+    "boundFrom": "",
+    "channelId": "",
+    "imProvider": "",
+    "merchantUserId": "",
+    "verifiedDomains": [
+      "agrimatcoai.com"
+    ]
   },
   "userProfile": {
-    "name": "rick",
-    "avatar": "https://lh3.googleusercontent.com/a/ACg8ocKed7CvoEavg1W6g_YinlrXyS9lGHQkVGDs5-6q9iJaVn8eDb4=s96-c",
-    "phone": "+86 12345678",
-    "pickupAddress": "三门峡"
+    "name": "",
+    "avatar": ""
   }
 }

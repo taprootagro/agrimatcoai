@@ -1,42 +1,42 @@
 {
   "pushConfig": {
-    "vapidPublicKey": "BFxuHPEYqeb4PfQaC3MqHhSCbUjAHzArj1aLDMmMOeftEgtPLH09heiS7FA0rY-dlUJEAAsce1OA1XnIlZVRwig",
+    "enabled": true,
     "pushApiBase": "",
-    "enabled": true
+    "vapidPublicKey": "BFxuHPEYqeb4PfQaC3MqHhSCbUjAHzArj1aLDMmMOeftEgtPLH09heiS7FA0rY-dlUJEAAsce1OA1XnIlZVRwig"
   },
   "pushProvidersConfig": {
-    "activeProvider": "webpush",
-    "webpush": {
-      "enabled": false,
-      "vapidPublicKey": "",
-      "pushApiBase": ""
-    },
     "fcm": {
-      "enabled": false,
+      "appId": "",
       "apiKey": "",
+      "enabled": false,
+      "vapidKey": "",
       "projectId": "",
-      "appId": "",
-      "messagingSenderId": "",
-      "vapidKey": ""
-    },
-    "onesignal": {
-      "enabled": false,
-      "appId": "",
-      "safariWebId": ""
-    },
-    "jpush": {
-      "enabled": false,
-      "appKey": "",
-      "masterSecret": "",
-      "channel": "",
-      "pushApiBase": ""
+      "messagingSenderId": ""
     },
     "getui": {
-      "enabled": false,
       "appId": "",
       "appKey": "",
-      "masterSecret": "",
-      "pushApiBase": ""
-    }
+      "enabled": false,
+      "pushApiBase": "",
+      "masterSecret": ""
+    },
+    "jpush": {
+      "appKey": "",
+      "channel": "",
+      "enabled": false,
+      "pushApiBase": "",
+      "masterSecret": ""
+    },
+    "webpush": {
+      "enabled": false,
+      "pushApiBase": "",
+      "vapidPublicKey": ""
+    },
+    "onesignal": {
+      "appId": "",
+      "enabled": false,
+      "safariWebId": ""
+    },
+    "activeProvider": "webpush"
   }
 }

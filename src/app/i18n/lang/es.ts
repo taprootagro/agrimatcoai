@@ -153,7 +153,7 @@ const translations: Translations = {
       storeBindCardSubtitle:
         'Muestre o cree el QR que escanean los agricultores para conectar con su tienda',
       farmerQrHint:
-        'Las tiendas escanean con Escanear; el dominio debe coincidir con la lista blanca.',
+        'ID de cuenta para verificación. Para vincular una tienda: Comunidad → Escanear el QR de la tienda (/m/…). Las tiendas no escanean este código.',
       title: 'Mi perfil',
       myInfo: 'Mi información',
       statistics: 'Estadísticas',
@@ -210,6 +210,12 @@ const translations: Translations = {
       addPhoneHint: 'Toca para añadir teléfono',
       completeProfileFirst:
         'Completa todos los campos y pulsa Guardar antes de cerrar.',
+      appRoleLabel: 'Tipo de cuenta',
+      appRoleFarmer: 'Agricultor',
+      appRoleStore: 'Tienda',
+      appRoleHintFirst: 'Elíjalo una sola vez. Tras guardar no podrá cambiarlo en la app; contacte soporte si necesita ayuda.',
+      appRoleLockedHint: 'El tipo de cuenta ya está fijado y no se puede cambiar en la app. Contacte soporte para cambios.',
+      appRoleRequired: 'Elija Agricultor o Tienda antes de guardar.',
       pickupAddressLabel: 'Dirección de recogida / entrega',
       pickupAddressLimit: 'Máximo {n} caracteres.',
       avatarTooLarge: 'Imagen demasiado grande. Elige una foto más pequeña.',

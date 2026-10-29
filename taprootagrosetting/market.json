@@ -1,53 +1,6 @@
 {
   "currencySymbol": "¥",
   "marketPage": {
-    "categories": [
-      {
-        "id": "herbicide",
-        "name": "her",
-        "_type": "category",
-        "subCategories": [
-          "demo1",
-          "demo2",
-          "demo3"
-        ]
-      },
-      {
-        "id": "insecticide",
-        "name": "ins",
-        "_type": "category",
-        "subCategories": [
-          "demo1",
-          "demo2",
-          "demo3"
-        ]
-      },
-      {
-        "id": "fungicide",
-        "name": "fun",
-        "_type": "category",
-        "subCategories": [
-          "demo1",
-          "demo2",
-          "demo3"
-        ]
-      },
-      {
-        "id": "Rice",
-        "name": "rice package",
-        "subCategories": [
-          "Pre-emergence",
-          "Post-emergence"
-        ]
-      },
-      {
-        "id": "corn",
-        "name": "corn package",
-        "subCategories": [
-          "corn package"
-        ]
-      }
-    ],
     "products": [
       {
         "id": 1,
@@ -237,6 +190,53 @@
         "description": "",
         "subCategory": "Post-emergence",
         "specifications": ""
+      }
+    ],
+    "categories": [
+      {
+        "id": "herbicide",
+        "name": "her",
+        "_type": "category",
+        "subCategories": [
+          "demo1",
+          "demo2",
+          "demo3"
+        ]
+      },
+      {
+        "id": "insecticide",
+        "name": "ins",
+        "_type": "category",
+        "subCategories": [
+          "demo1",
+          "demo2",
+          "demo3"
+        ]
+      },
+      {
+        "id": "fungicide",
+        "name": "fun",
+        "_type": "category",
+        "subCategories": [
+          "demo1",
+          "demo2",
+          "demo3"
+        ]
+      },
+      {
+        "id": "Rice",
+        "name": "rice package",
+        "subCategories": [
+          "Pre-emergence",
+          "Post-emergence"
+        ]
+      },
+      {
+        "id": "corn",
+        "name": "corn package",
+        "subCategories": [
+          "corn package"
+        ]
       }
     ],
     "advertisements": [

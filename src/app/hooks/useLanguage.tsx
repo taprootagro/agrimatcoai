@@ -174,6 +174,9 @@ export interface Translations {
     liveChatReconnectFailed?: string;
     storeScanRejectMerchantBindQr?: string;
     scanNeedFarmerLogin?: string;
+    scanNeedStoreLogin?: string;
+    scanRejectFarmerBindQr?: string;
+    bindWarningStore?: string;
     qrNotSupported?: string;
     noQrDetected?: string;
     scanFailed?: string;
@@ -280,6 +283,13 @@ export interface Translations {
     phoneHint?: string;
     addPhoneHint?: string;
     completeProfileFirst?: string;
+    /** 首次资料：农民 / 商店（app_role） */
+    appRoleLabel?: string;
+    appRoleFarmer?: string;
+    appRoleStore?: string;
+    appRoleHintFirst?: string;
+    appRoleLockedHint?: string;
+    appRoleRequired?: string;
     pickupAddressLabel?: string;
     pickupAddressLimit?: string;
     avatarTooLarge?: string;

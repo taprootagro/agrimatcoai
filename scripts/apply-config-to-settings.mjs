@@ -33,7 +33,7 @@ function resolveInputPath(argPath) {
   return path.join(root, '.tmp-seed.json');
 }
 
-function splitConfigToSettings(cfg) {
+export function splitConfigToSettings(cfg) {
   writeJsonFile('home.json', {
     banners: cfg.banners ?? [],
     navigation: cfg.navigation ?? [],
@@ -186,13 +186,21 @@ function splitConfigToSettings(cfg) {
   });
 }
 
-const inputPath = resolveInputPath(process.argv[2]);
-if (!fs.existsSync(inputPath)) {
-  console.error(`[apply-config-to-settings] input not found: ${inputPath}`);
-  console.error('Save in Content Manager (npm run dev) or place cms-export.json at project root.');
-  process.exit(1);
+function isDirectRun() {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  return path.resolve(entry) === path.resolve(fileURLToPath(import.meta.url));
 }
 
-const cfg = readJsonFile(inputPath);
-splitConfigToSettings(cfg);
-console.log(`[apply-config-to-settings] wrote taprootagrosetting/*.json from ${path.basename(inputPath)}`);
+if (isDirectRun()) {
+  const inputPath = resolveInputPath(process.argv[2]);
+  if (!fs.existsSync(inputPath)) {
+    console.error(`[apply-config-to-settings] input not found: ${inputPath}`);
+    console.error('Save in Content Manager (npm run dev) or place cms-export.json at project root.');
+    process.exit(1);
+  }
+
+  const cfg = readJsonFile(inputPath);
+  splitConfigToSettings(cfg);
+  console.log(`[apply-config-to-settings] wrote taprootagrosetting/*.json from ${path.basename(inputPath)}`);
+}

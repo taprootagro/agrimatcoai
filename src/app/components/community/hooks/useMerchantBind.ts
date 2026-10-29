@@ -1,12 +1,9 @@
 // ============================================================================
-// useMerchantBind — farmer side of the account-based QR flow
+// useMerchantBind — bidirectional account QR bind
 // ============================================================================
-// Farmer scans a store QR (https://<whitelisted>/m/<merchant_user_id_uuid>),
-// then calls Edge `merchant-bind-resolve?token=<merchant_uuid>` with Authorization: Bearer <access_token>.
-//
-// Store-scans-farmer (legacy `/f/<id>` inbound to store) is removed: the store
-// directory is synced from Supabase via `storeBindingRepo.syncStorePeersFromCloud`
-// as soon as a farmer scans — no manual confirmation needed on the store side.
+// Farmer: scan store QR https://<domain>/m/<merchant_user_id> → ?token=
+// Store:   scan farmer QR https://<domain>/f/<farmer_user_id>   → ?farmer=
+// Edge: merchant-bind-resolve with Authorization: Bearer <access_token>
 // ============================================================================
 
 import { useState, useEffect, useCallback } from "react";
@@ -24,6 +21,15 @@ export interface MerchantBindScanResult {
     subtitle: string;
     imProvider: string;
   };
+  farmerData?: {
+    farmerUserId: string;
+    merchantUserId: string;
+    channelId: string;
+    name: string;
+    avatar: string;
+    subtitle: string;
+    imProvider: string;
+  };
   sourceDomain?: string;
   rejectReason?: string;
 }
@@ -32,9 +38,9 @@ const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const MERCHANT_PATH_RE = new RegExp(`^/m/(${UUID_RE.source.slice(1, -1)})/?$`, "i");
+const FARMER_PATH_RE = new RegExp(`^/f/(${UUID_RE.source.slice(1, -1)})/?$`, "i");
 
 export function useMerchantBind(options?: {
-  /** Kept for backward signature compatibility; unused now that peers cloud-sync. */
   onStorePeerAdded?: () => void;
   /**
    * When set, overrides `config.communityUiMode` for store vs farmer QR/bind behavior.
@@ -44,8 +50,6 @@ export function useMerchantBind(options?: {
 }) {
   const { config, saveConfig } = useConfigContext();
   const { t } = useLanguage();
-  // onStorePeerAdded is accepted but no longer triggered (store peers now sync via cloud)
-  void options?.onStorePeerAdded;
 
   const [showScanner, setShowScanner] = useState(false);
   const [showScanActionSheet, setShowScanActionSheet] = useState(false);
@@ -122,39 +126,86 @@ export function useMerchantBind(options?: {
             return;
           }
 
+          const merchantPathMatch = url.pathname.match(MERCHANT_PATH_RE);
+          const farmerPathMatch = url.pathname.match(FARMER_PATH_RE);
+
+          let qs: URLSearchParams;
+
           if (isStoreMode) {
-            setScanResult({
-              status: "rejected",
-              sourceDomain,
-              rejectReason:
-                t.community?.storeScanRejectMerchantBindQr ??
-                "门店无需扫码：农户扫本店二维码即可自动出现在联系人中 / Store: farmers appear automatically when they scan your QR",
-            });
-            return;
-          }
+            if (merchantPathMatch) {
+              setScanResult({
+                status: "rejected",
+                sourceDomain,
+                rejectReason:
+                  t.community?.storeScanRejectMerchantBindQr ??
+                  "请扫描农户出示的账号码（/f/…），不要扫门店绑定码 / Scan the farmer's /f/ QR, not the store bind code",
+              });
+              return;
+            }
+            const farmerUserIdFromQr = (farmerPathMatch?.[1] || "").toLowerCase();
+            if (!farmerUserIdFromQr || !UUID_RE.test(farmerUserIdFromQr)) {
+              setScanResult({
+                status: "rejected",
+                sourceDomain,
+                rejectReason:
+                  "二维码格式无效（需 /f/<farmer_user_id_uuid>） / QR must be /f/<farmer_user_id_uuid>",
+              });
+              return;
+            }
 
-          const match = url.pathname.match(MERCHANT_PATH_RE);
-          const merchantUserId = (match?.[1] || "").toLowerCase();
-          if (!merchantUserId || !UUID_RE.test(merchantUserId)) {
-            setScanResult({
-              status: "rejected",
-              sourceDomain,
-              rejectReason:
-                "二维码格式无效（需 /m/<merchant_user_id_uuid>） / QR must be /m/<merchant_user_id_uuid>",
-            });
-            return;
-          }
+            const merchantUserId = getUserId();
+            if (!merchantUserId || !UUID_RE.test(merchantUserId)) {
+              setScanResult({
+                status: "rejected",
+                sourceDomain,
+                rejectReason:
+                  t.community?.scanNeedStoreLogin ??
+                  "请先登录门店账号后再扫码 / Sign in with your store account before scanning",
+              });
+              return;
+            }
 
-          const farmerUserId = getUserId();
-          if (!farmerUserId || !UUID_RE.test(farmerUserId)) {
-            setScanResult({
-              status: "rejected",
-              sourceDomain,
-              rejectReason:
-                t.community?.scanNeedFarmerLogin ??
-                "请先登录后再扫码绑定门店 / Sign in before scanning the store QR",
-            });
-            return;
+            qs = new URLSearchParams({ farmer: farmerUserIdFromQr });
+          } else {
+            if (farmerPathMatch) {
+              setScanResult({
+                status: "rejected",
+                sourceDomain,
+                rejectReason:
+                  t.community?.scanRejectFarmerBindQr ??
+                  "请扫描门店绑定码（/m/…），不要扫农户账号码 / Scan the store bind QR (/m/…)",
+              });
+              return;
+            }
+
+            const merchantUserId = (merchantPathMatch?.[1] || "").toLowerCase();
+            if (!merchantUserId || !UUID_RE.test(merchantUserId)) {
+              setScanResult({
+                status: "rejected",
+                sourceDomain,
+                rejectReason:
+                  "二维码格式无效（需 /m/<merchant_user_id_uuid>） / QR must be /m/<merchant_user_id_uuid>",
+              });
+              return;
+            }
+
+            const farmerUserId = getUserId();
+            if (!farmerUserId || !UUID_RE.test(farmerUserId)) {
+              setScanResult({
+                status: "rejected",
+                sourceDomain,
+                rejectReason:
+                  t.community?.scanNeedFarmerLogin ??
+                  "请先登录后再扫码绑定门店 / Sign in before scanning the store QR",
+              });
+              return;
+            }
+
+            qs = new URLSearchParams({ token: merchantUserId });
+            const bindDay = url.searchParams.get("day")?.trim();
+            const bindSig = url.searchParams.get("sig")?.trim();
+            if (bindDay) qs.set("day", bindDay);
+            if (bindSig) qs.set("sig", bindSig);
           }
 
           const accessToken = getAccessToken()?.trim();
@@ -162,9 +213,11 @@ export function useMerchantBind(options?: {
             setScanResult({
               status: "rejected",
               sourceDomain,
-              rejectReason:
-                t.community?.scanNeedFarmerLogin ??
-                "请先登录后再扫码绑定门店 / Sign in before scanning the store QR",
+              rejectReason: isStoreMode
+                ? (t.community?.scanNeedStoreLogin ??
+                  "请先登录门店账号后再扫码 / Sign in with your store account")
+                : (t.community?.scanNeedFarmerLogin ??
+                  "请先登录后再扫码绑定门店 / Sign in before scanning the store QR"),
             });
             return;
           }
@@ -181,14 +234,6 @@ export function useMerchantBind(options?: {
             });
             return;
           }
-
-          const qs = new URLSearchParams({
-            token: merchantUserId,
-          });
-          const bindDay = url.searchParams.get("day")?.trim();
-          const bindSig = url.searchParams.get("sig")?.trim();
-          if (bindDay) qs.set("day", bindDay);
-          if (bindSig) qs.set("sig", bindSig);
 
           const res = await fetch(
             `${base}/functions/v1/merchant-bind-resolve?${qs.toString()}`,
@@ -249,7 +294,7 @@ export function useMerchantBind(options?: {
               sourceDomain,
               rejectReason:
                 (data.error as string) ||
-                "二维码无效或门店未找到 / Invalid QR or merchant not found",
+                "二维码无效或未找到账号 / Invalid QR or account not found",
             });
             return;
           }
@@ -265,18 +310,44 @@ export function useMerchantBind(options?: {
             return;
           }
 
-          setScanResult({
-            status: "verified",
-            sourceDomain,
-            merchantData: {
-              merchantUserId: String(data.merchantUserId ?? merchantUserId),
-              channelId,
-              name: String(data.name ?? ""),
-              avatar: String(data.avatar ?? ""),
-              subtitle: String(data.subtitle ?? ""),
-              imProvider: String(data.imProvider ?? "supabase"),
-            },
-          });
+          const imProvider = String(data.imProvider ?? "supabase");
+          const displayName = String(data.name ?? "");
+          const displayAvatar = String(data.avatar ?? "");
+          const displaySubtitle = String(data.subtitle ?? "");
+          const merchantUserIdResolved = String(data.merchantUserId ?? "").toLowerCase();
+          const farmerUserIdResolved = String(data.farmerUserId ?? "").toLowerCase();
+
+          if (isStoreMode) {
+            const farmerUserId = farmerUserIdResolved || (farmerPathMatch?.[1] || "").toLowerCase();
+            setScanResult({
+              status: "verified",
+              sourceDomain,
+              farmerData: {
+                farmerUserId,
+                merchantUserId: merchantUserIdResolved || getUserId() || "",
+                channelId,
+                name: displayName,
+                avatar: displayAvatar,
+                subtitle: displaySubtitle,
+                imProvider,
+              },
+            });
+          } else {
+            const merchantUserId =
+              merchantUserIdResolved || (merchantPathMatch?.[1] || "").toLowerCase();
+            setScanResult({
+              status: "verified",
+              sourceDomain,
+              merchantData: {
+                merchantUserId,
+                channelId,
+                name: displayName,
+                avatar: displayAvatar,
+                subtitle: displaySubtitle,
+                imProvider,
+              },
+            });
+          }
         } catch {
           setScanResult({
             status: "rejected",
@@ -291,12 +362,22 @@ export function useMerchantBind(options?: {
       config?.backendProxyConfig,
       isStoreMode,
       t.community?.scanNeedFarmerLogin,
+      t.community?.scanNeedStoreLogin,
+      t.community?.scanRejectFarmerBindQr,
       t.community?.storeScanRejectMerchantBindQr,
     ],
   );
 
   const confirmBindMerchant = useCallback(() => {
     if (!scanResult || scanResult.status !== "verified" || !config) return;
+
+    if (isStoreMode && scanResult.farmerData) {
+      console.log("[Scan] Store bound farmer:", scanResult.farmerData);
+      setScanResult(null);
+      void options?.onStorePeerAdded?.();
+      return;
+    }
+
     if (!scanResult.merchantData) return;
 
     const m = scanResult.merchantData;
@@ -322,7 +403,7 @@ export function useMerchantBind(options?: {
 
     console.log("[Scan] Merchant bound:", updatedContact);
     setScanResult(null);
-  }, [scanResult, config, saveConfig]);
+  }, [scanResult, config, saveConfig, isStoreMode, options]);
 
   const handleScanAlbumFile = useCallback(
     async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -382,5 +463,6 @@ export function useMerchantBind(options?: {
     processScanResult,
     confirmBindMerchant,
     handleScanAlbumFile,
+    isStoreMode,
   };
 }

@@ -1,27 +1,28 @@
 // ============================================================================
 // merchant-bind-resolve — account-based QR resolver
 // ============================================================================
-// GET /merchant-bind-resolve?token=<merchant_user_id_uuid>
+// GET /merchant-bind-resolve
 //
-// **农户身份仅以 JWT 为准**（Authorization: Bearer <用户 access_token>，不得传 anon key）。
-// 查询参数不再接受 farmerUserId（旧客户端若传会被忽略；防伪造）。
+// Mode A — farmer scans store QR:
+//   ?token=<merchant_user_id_uuid>[&day=YYYY-MM-DD&sig=<hmac>]
+//   JWT user = farmer. Optional HMAC on token (store QR).
 //
-// QR content: https://<verified-domain>/m/<merchant_user_id_uuid>[?day=YYYY-MM-DD&sig=<hmac>]
-//   - token = merchant Supabase auth user id (UUID)
-//   - 可选 HMAC：MERCHANT_BIND_REQUIRE_SIG=true 时须带 day（当日 UTC）与 sig，
-//     sig = base64url(HMAC-SHA256(MERCHANT_BIND_HMAC_SECRET, merchant_id|day))；门店用 merchant-bind-qr-url 生成。
-//   - 日配额（可选）：MERCHANT_BIND_MAX_NEW_MERCHANTS_PER_FARMER_PER_DAY、
-//     MERCHANT_BIND_MAX_NEW_FARMERS_PER_MERCHANT_PER_DAY（0=不限制）
+// Mode B — store scans farmer QR:
+//   ?farmer=<farmer_user_id_uuid>
+//   JWT user = merchant (app_role=distributor). No HMAC on /f/ codes.
+//
+// Authorization: Bearer <用户 access_token>（不得传 anon key）。
+//
+// QR: https://<domain>/m/<merchant_uuid> or https://<domain>/f/<farmer_uuid>
 //
 // Server-side work:
-//   1. Look up merchant's display profile from user_profiles (must exist, app_role=distributor)
-//   2. Allocate or reuse channel_id in merchant_farmer_channels keyed by
-//      (merchant_user_id, farmer_user_id).
-//   3. Mirror into farmer_merchant_bindings (ON CONFLICT DO NOTHING) so the
-//      farmer can recover chatContact on a new device via RLS SELECT.
+//   1. Validate merchant (distributor) and counterparty profile for response display
+//   2. Allocate or reuse channel_id in merchant_farmer_channels
+//   3. Mirror into farmer_merchant_bindings for farmer device recovery
 //
 // Response JSON:
-//   { ok: true, merchantUserId, channelId, name, avatar, subtitle, imProvider: 'supabase' }
+//   { ok: true, bindInitiator: 'farmer'|'store', merchantUserId, farmerUserId,
+//     channelId, name, avatar, subtitle, imProvider: 'supabase' }
 //
 // Depends on migrations/001_init.sql (merchant_farmer_channels + farmer_merchant_bindings).
 // ============================================================================
@@ -383,10 +384,14 @@ Deno.serve(async (req: Request) => {
   }
 
   const url = new URL(req.url);
-  const merchantUserId = normalizeUuid(url.searchParams.get("token"));
+  const tokenMerchant = normalizeUuid(url.searchParams.get("token"));
+  const farmerParam = normalizeUuid(url.searchParams.get("farmer"));
 
-  if (!merchantUserId) {
-    return err("Missing or invalid token (expect merchant user id UUID)", 400);
+  if (tokenMerchant && farmerParam) {
+    return err("Use token (farmer scans store) or farmer (store scans farmer), not both", 400);
+  }
+  if (!tokenMerchant && !farmerParam) {
+    return err("Missing or invalid token or farmer query parameter", 400);
   }
 
   const jwt = extractUserJwt(req);
@@ -394,12 +399,19 @@ Deno.serve(async (req: Request) => {
     return err("Unauthorized: sign in and send Authorization: Bearer <access_token> (not anon key)", 401);
   }
 
-  const authFarmerId = await getAuthUserId(jwt);
-  if (!authFarmerId) {
+  const authUserId = await getAuthUserId(jwt);
+  if (!authUserId) {
     return err("Unauthorized: invalid or expired session", 401);
   }
 
-  const farmerUserId = authFarmerId.toLowerCase();
+  const bindInitiator: "farmer" | "store" = farmerParam ? "store" : "farmer";
+  const merchantUserId = bindInitiator === "store"
+    ? normalizeUuid(authUserId)!
+    : tokenMerchant!;
+  const farmerUserId = bindInitiator === "store"
+    ? farmerParam!
+    : authUserId.toLowerCase();
+
   if (merchantUserId === farmerUserId) {
     return err("Cannot bind to yourself", 400);
   }
@@ -412,7 +424,8 @@ Deno.serve(async (req: Request) => {
 
   const admin = adminClient();
 
-  const rl = await enforceMerchantBindRateLimit(admin, farmerUserId);
+  const rateLimitUserId = bindInitiator === "store" ? merchantUserId : farmerUserId;
+  const rl = await enforceMerchantBindRateLimit(admin, rateLimitUserId);
   if (!rl.ok) {
     return json(
       { ok: false, error: "RATE_LIMIT", retry_after_seconds: rl.retryAfter },
@@ -420,32 +433,61 @@ Deno.serve(async (req: Request) => {
     );
   }
 
-  const sigBlock = await verifyMerchantBindSignature(req.url, merchantUserId);
-  if (sigBlock) return sigBlock;
+  if (bindInitiator === "farmer") {
+    const sigBlock = await verifyMerchantBindSignature(req.url, merchantUserId);
+    if (sigBlock) return sigBlock;
+  }
 
-  // 1. 校验 merchant 存在、app_role=distributor，并加载显示资料
-  const { data: profileRow, error: profErr } = await admin
+  // 1. 校验 merchant 存在、app_role=distributor
+  const { data: merchantRow, error: merchantErr } = await admin
     .from("user_profiles")
     .select("profile, display_name, avatar_url, app_role")
     .eq("user_id", merchantUserId)
     .maybeSingle();
 
-  if (profErr) {
-    console.error("[merchant-bind-resolve] user_profiles", profErr);
+  if (merchantErr) {
+    console.error("[merchant-bind-resolve] user_profiles merchant", merchantErr);
     return err("Merchant lookup failed", 500);
   }
-  if (!profileRow) {
+  if (!merchantRow) {
     return err("Merchant not found", 404);
   }
-  if (profileRow.app_role !== "distributor") {
-    return err("Forbidden: merchant is not a distributor", 403);
+  if (merchantRow.app_role !== "distributor") {
+    return err(
+      bindInitiator === "store"
+        ? "Forbidden: store account must be a distributor"
+        : "Forbidden: merchant is not a distributor",
+      403,
+    );
   }
 
-  const { name, avatar, subtitle } = extractMerchantProfile(
-    profileRow.profile,
-    profileRow.display_name as string | null | undefined,
-    profileRow.avatar_url as string | null | undefined,
-  );
+  let counterparty: MerchantProfile;
+  if (bindInitiator === "farmer") {
+    counterparty = extractMerchantProfile(
+      merchantRow.profile,
+      merchantRow.display_name as string | null | undefined,
+      merchantRow.avatar_url as string | null | undefined,
+    );
+  } else {
+    const { data: farmerRow, error: farmerErr } = await admin
+      .from("user_profiles")
+      .select("profile, display_name, avatar_url")
+      .eq("user_id", farmerUserId)
+      .maybeSingle();
+
+    if (farmerErr) {
+      console.error("[merchant-bind-resolve] user_profiles farmer", farmerErr);
+      return err("Farmer lookup failed", 500);
+    }
+    if (!farmerRow) {
+      return err("Farmer not found", 404);
+    }
+    counterparty = extractMerchantProfile(
+      farmerRow.profile,
+      farmerRow.display_name as string | null | undefined,
+      farmerRow.avatar_url as string | null | undefined,
+    );
+  }
 
   // 2. 分配/复用 channel
   const { data: existingBind, error: bindSelErr } = await admin
@@ -478,11 +520,13 @@ Deno.serve(async (req: Request) => {
 
   return json({
     ok: true,
+    bindInitiator,
     merchantUserId,
+    farmerUserId,
     channelId,
-    name,
-    avatar,
-    subtitle,
+    name: counterparty.name,
+    avatar: counterparty.avatar,
+    subtitle: counterparty.subtitle,
     imProvider: "supabase",
   });
 });

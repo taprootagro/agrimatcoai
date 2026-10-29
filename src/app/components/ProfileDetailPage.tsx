@@ -2,6 +2,7 @@ import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import { Camera, User, Copy, Check, MapPin, Loader2 } from "lucide-react";
 import { SecondaryView } from "./SecondaryView";
 import { useLanguage } from "../hooks/useLanguage";
+import type { AppRole } from "../hooks/useEdgeProfile";
 import { useConfigContext } from "../hooks/ConfigProvider";
 import {
   getUserId,
@@ -71,6 +72,10 @@ interface ProfileDetailPageProps {
   onRemoteProfileSaved?: () => void;
   /** Edge 判定资料是否已完善；未完善时不做编辑频率限制（首次填写可多次保存） */
   profileCompleted?: boolean;
+  appRole?: AppRole;
+  appRoleChosen?: boolean;
+  /** dev：?pickRole=1 强制展示农民/商店选项 */
+  forceRolePicker?: boolean;
 }
 
 export function ProfileDetailPage({
@@ -81,6 +86,9 @@ export function ProfileDetailPage({
   profileError = null,
   onRemoteProfileSaved,
   profileCompleted = false,
+  appRole = "farmer",
+  appRoleChosen = false,
+  forceRolePicker = false,
 }: ProfileDetailPageProps) {
   const { t, language } = useLanguage();
   const { config, saveConfig } = useConfigContext();
@@ -118,7 +126,9 @@ export function ProfileDetailPage({
   const [countryFromGps, setCountryFromGps] = useState(false);
   const [locatingCountry, setLocatingCountry] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [showFieldErrors, setShowFieldErrors] = useState(!profileCompleted);
+  const [showFieldErrors, setShowFieldErrors] = useState(
+    !profileCompleted || (isServer && !appRoleChosen),
+  );
   const [toast, setToast] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [linkedGoogleEmail, setLinkedGoogleEmail] = useState<string>(() =>
@@ -133,7 +143,22 @@ export function ProfileDetailPage({
 
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const lastServerHydrationKeyRef = useRef("");
-  const mustCompleteProfile = isServer && !profileCompleted;
+  const mustCompleteProfile =
+    isServer && (!profileCompleted || !appRoleChosen);
+  const showAccountTypeSection = isServer || forceRolePicker;
+  const rolePickerActive =
+    showAccountTypeSection && (!appRoleChosen || forceRolePicker);
+  const [draftAppRole, setDraftAppRole] = useState<AppRole | null>(() =>
+    rolePickerActive ? null : appRole,
+  );
+
+  useEffect(() => {
+    if (rolePickerActive) {
+      setDraftAppRole(null);
+      return;
+    }
+    setDraftAppRole(appRole);
+  }, [rolePickerActive, appRole]);
 
   const countryFromProfileJson = useCallback(
     (p: Record<string, unknown> | null | undefined): string => {
@@ -330,6 +355,8 @@ export function ProfileDetailPage({
       !isValidProfilePhoneParts(dialCode, nationalNumber));
   const pickupInvalid = showFieldErrors && !pickup.trim();
   const avatarInvalid = showFieldErrors && !avatar;
+  const roleInvalid =
+    showFieldErrors && rolePickerActive && draftAppRole === null;
 
   const handleSave = useCallback(async () => {
     const pickupTrim = pickup.trim().slice(0, PICKUP_MAX);
@@ -344,9 +371,20 @@ export function ProfileDetailPage({
     const countryEmpty = !countryIso;
     const phoneEmpty = !nationalNumber.replace(/\D/g, "").trim();
     const pickupEmpty = !pickupTrim;
-    if (nameEmpty || countryEmpty || phoneEmpty || pickupEmpty) {
+    if (
+      nameEmpty ||
+      countryEmpty ||
+      phoneEmpty ||
+      pickupEmpty ||
+      (rolePickerActive && draftAppRole === null)
+    ) {
       setShowFieldErrors(true);
-      showToast(t.profile.completeProfileFirst!);
+      showToast(
+        rolePickerActive && draftAppRole === null
+          ? (t.profile.appRoleRequired ||
+              t.profile.completeProfileFirst!)
+          : t.profile.completeProfileFirst!,
+      );
       return;
     }
 
@@ -430,6 +468,9 @@ export function ProfileDetailPage({
                     av.length <= AVATAR_DATA_URL_EDGE_MAX))
               ) {
                 payload.avatarUrl = av;
+              }
+              if (rolePickerActive && draftAppRole) {
+                payload.appRole = draftAppRole;
               }
               const res = await fetch(url, {
                 method: "POST",
@@ -517,6 +558,8 @@ export function ProfileDetailPage({
     isServer,
     onRemoteProfileSaved,
     profileCompleted,
+    rolePickerActive,
+    draftAppRole,
   ]);
 
   const handleCopyId = useCallback(() => {
@@ -617,6 +660,60 @@ export function ProfileDetailPage({
         ) : null}
 
         <div className="bg-white rounded-2xl p-4 shadow-sm space-y-4">
+          {showAccountTypeSection ? (
+            <div>
+              <label className="text-xs font-medium text-gray-500 mb-1.5 block">
+                {t.profile.appRoleLabel || "Account type"}
+              </label>
+              {rolePickerActive ? (
+                <>
+                  <p className="text-[11px] text-gray-500 mb-2 leading-relaxed">
+                    {t.profile.appRoleHintFirst ||
+                      "Choose once. You cannot change this yourself later."}
+                  </p>
+                  <div className="grid grid-cols-2 gap-2">
+                    {(
+                      [
+                        ["farmer", t.profile.appRoleFarmer || "Farmer"],
+                        ["distributor", t.profile.appRoleStore || "Store"],
+                      ] as const
+                    ).map(([value, label]) => {
+                      const selected = draftAppRole === value;
+                      return (
+                        <button
+                          key={value}
+                          type="button"
+                          onClick={() => setDraftAppRole(value)}
+                          className={`py-3 px-2 rounded-xl text-sm font-medium border transition-colors ${
+                            selected
+                              ? "border-emerald-500 bg-emerald-50 text-emerald-800"
+                              : roleInvalid
+                                ? "border-red-300 bg-red-50/30 text-gray-700"
+                                : "border-gray-200 bg-gray-50 text-gray-700 active:bg-gray-100"
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <p className="text-sm text-gray-900 font-medium">
+                    {appRole === "distributor"
+                      ? t.profile.appRoleStore || "Store"
+                      : t.profile.appRoleFarmer || "Farmer"}
+                  </p>
+                  <p className="text-[11px] text-gray-500 mt-1 leading-relaxed">
+                    {t.profile.appRoleLockedHint ||
+                      "Your account type was set and cannot be changed in the app. Contact support if you need help."}
+                  </p>
+                </>
+              )}
+            </div>
+          ) : null}
+
           <div>
             <label className="text-xs font-medium text-gray-500 mb-1.5 block">
               {t.profile.nickname!}

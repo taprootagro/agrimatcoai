@@ -699,6 +699,7 @@ export function StoreCommunityShell({ storeUserId }: { storeUserId: string }) {
             setScanResult={setScanResult}
             confirmBindMerchant={confirmBindMerchant}
             handleQRScanResult={handleQRScanResult}
+            isStoreShell
           />
         </Suspense>
       )}

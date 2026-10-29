@@ -8,4 +8,6 @@
 
 **`app_config` 种子与 `taprootagrosetting/` 对齐**：修改默认 JSON 后执行 `node scripts/generate-seed-sql.mjs --write-init`，会更新本目录下 `001_init.sql` 内 `INSERT INTO app_config` 块（PostgreSQL 美元引用包裹 JSON，避免转义问题）。
 
+**从线上 `app_config` 拉回仓库（图 URL 在 JSON 里，Storage 文件需另备）**：`npm run pull:app-config-seed`（读 `taprootagrosetting/backend.json` 或 `SUPABASE_URL`；本地可设 `SUPABASE_SERVICE_ROLE_KEY` 拉完整 JSON）→ 写 `cms-export.json`、`taprootagrosetting/*.json` 并更新 `001_init.sql`。
+
 **Edge Functions（Deno）不在此目录**：请使用上一级目录中的 **[../deploy-functions.sh](../deploy-functions.sh)** 在本机部署到 Supabase。详见 [../README.md](../README.md) 与 [../../farmer-developer/DEPLOY_GUIDE_CN.md](../../farmer-developer/DEPLOY_GUIDE_CN.md)。

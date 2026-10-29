@@ -1,15 +1,15 @@
 {
   "profileEditCooldownSeconds": 300,
   "appBranding": {
-    "logoUrl": "",
+    "slogan": "Serving generations of farmers",
     "appName": "Agrimatco AI",
-    "slogan": "Serving generations of farmers"
+    "logoUrl": "https://cdn.agrimatcoai.com/logo/icon-512.png"
   },
   "splashScreen": {
-    "imageUrl": "",
-    "minDisplayMs": 2000,
-    "maxResourceWaitMs": 4000,
-    "showSkipButton": true
+    "imageUrl": "content/0de7078e-b9e2-4f68-b0ee-c5aa4c4e7b82/1793254235620-_2026-10-29_14.10.19.webp",
+    "minDisplayMs": 4000,
+    "showSkipButton": true,
+    "maxResourceWaitMs": 8000
   },
   "desktopIcon": {
     "appName": "Agrimatco AI",
@@ -17,9 +17,9 @@
     "icon512Url": ""
   },
   "filing": {
-    "icpNumber": "",
     "icpUrl": "",
-    "policeNumber": "",
-    "policeUrl": ""
+    "icpNumber": "",
+    "policeUrl": "",
+    "policeNumber": ""
   }
 }
