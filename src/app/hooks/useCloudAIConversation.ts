@@ -15,6 +15,7 @@ import {
   ABORTED,
   IMAGE_TOO_LARGE,
   IMAGE_DECODE_FAILED,
+  AI_EMPTY_RESPONSE,
   type AIRequestExtras,
   type DeepAnalysisResult,
   buildCloudAiHistory,
@@ -52,6 +53,8 @@ function formatCloudAiError(raw: string, a: AiStrings, variant: "chat" | "detail
   if (msg === AI_PROVIDER_MISCONFIGURED) return a.providerMisconfigured || a.deepAnalysisError;
   if (msg === AI_NETWORK) return a.networkErrorHint || a.deepAnalysisError;
   if (msg === ABORTED) return a.deepAnalysisError;
+  // 2xx 但模型没有返回正文（空流 / 拒答 / 未知结构）：按失败处理，可重试
+  if (msg === AI_EMPTY_RESPONSE || msg === "EMPTY_RESPONSE") return a.deepAnalysisError;
   const cd = /^COOLDOWN:(\d+)$/.exec(msg);
   if (cd) return a.cooldownWait.replace(/\{seconds\}/g, cd[1]!);
   if (msg === "RATE_LIMITED" || msg === "CHAT_TOO_FAST") return a.chatMessageTooFast;

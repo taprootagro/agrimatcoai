@@ -437,7 +437,7 @@ function pipeProviderSse(
               continue;
             }
             const delta = kind === "openai"
-              ? String(data.choices?.[0]?.delta?.content ?? "")
+              ? textFromParts(data.choices?.[0]?.delta?.content)
               : extractText(data);
             if (delta) {
               full += delta;
@@ -449,6 +449,13 @@ function pipeProviderSse(
               holder.completion_tokens = u.completion_tokens ?? holder.completion_tokens;
             }
           }
+        }
+        if (!full.trim()) {
+          // No text at all (filtered / refusal / unexpected chunk shape): fail so the client
+          // shows a retryable error and the quota is refunded instead of returning "".
+          console.warn(`[ai-vision][${provider}] stream ended with empty analysis`, { model });
+          send({ error: "EMPTY_RESPONSE" });
+          return;
         }
         holder.ok = true;
         send({ done: true, analysis: full, provider, model });
@@ -529,8 +536,10 @@ async function completeOpenAiStyle(
   if (!res.ok) return res;
   if (stream) return pipeProviderSse(res, "openai", provider, model);
   const data = await res.json();
+  const analysis = extractText(data);
+  if (!analysis.trim()) return emptyAnalysisResponse(label, data);
   return rememberUsage(
-    json({ analysis: extractText(data), provider, model }),
+    json({ analysis, provider, model }),
     { model, ...usageFromProviderPayload(data), ok: true },
   );
 }
@@ -554,8 +563,10 @@ async function completeGeminiStyle(
   if (!res.ok) return res;
   if (stream) return pipeProviderSse(res, "gemini", "Gemini", model);
   const data = await res.json();
+  const analysis = extractText(data);
+  if (!analysis.trim()) return emptyAnalysisResponse(label, data);
   return rememberUsage(
-    json({ analysis: extractText(data), provider: "Gemini", model }),
+    json({ analysis, provider: "Gemini", model }),
     { model, ...usageFromProviderPayload(data), ok: true },
   );
 }
@@ -1342,16 +1353,39 @@ function buildTextMessages(
 
 // ---- Helper: Extract text from AI response ----
 
+/** `content` / `parts` may be a string or an array of `{ text }` parts (OpenAI vision, Gemini). */
+function textFromParts(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!Array.isArray(value)) return "";
+  return value
+    .map((p: any) => (typeof p === "string" ? p : typeof p?.text === "string" && p?.thought !== true ? p.text : ""))
+    .join("");
+}
+
 function extractText(data: any): string {
-  // Try common response formats
-  if (data.choices?.[0]?.message?.content) return data.choices[0].message.content;
-  if (data.output?.text) return data.output.text;
-  if (data.output?.choices?.[0]?.message?.content) return data.output.choices[0].message.content;
-  if (data.candidates?.[0]?.content?.parts?.[0]?.text) return data.candidates[0].content.parts[0].text;
-  if (data.text) return data.text;
-  if (data.content) return data.content;
   if (typeof data === "string") return data;
-  return "";
+  if (!data || typeof data !== "object") return "";
+  // Try common response formats
+  const msg = data.choices?.[0]?.message;
+  const fromChoice = textFromParts(msg?.content) || textFromParts(msg?.refusal);
+  if (fromChoice) return fromChoice;
+  const fromOutput = textFromParts(data.output?.text) || textFromParts(data.output?.choices?.[0]?.message?.content);
+  if (fromOutput) return fromOutput;
+  const fromGemini = textFromParts(data.candidates?.[0]?.content?.parts);
+  if (fromGemini) return fromGemini;
+  return textFromParts(data.text) || textFromParts(data.content);
+}
+
+/** 2xx from the provider but no text — log the shape (never the image) and refund via 502. */
+function emptyAnalysisResponse(label: string, data: unknown): Response {
+  const d = (data && typeof data === "object" ? data : {}) as Record<string, any>;
+  console.warn(`[ai-vision][${label}] empty analysis text`, {
+    keys: Object.keys(d),
+    finish_reason: d.choices?.[0]?.finish_reason ?? d.candidates?.[0]?.finishReason ?? null,
+    prompt_feedback: d.promptFeedback ?? null,
+    error: d.error ?? null,
+  });
+  return json({ error: "EMPTY_RESPONSE" }, 502);
 }
 
 // ============================================================================

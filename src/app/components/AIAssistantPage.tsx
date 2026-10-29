@@ -131,6 +131,9 @@ export function AIAssistantPage({ onClose }: AIAssistantPageProps) {
   const cameraInputRef = useRef<HTMLInputElement>(null);
 
   const [image, setImage] = useState<string | null>(() => peekAiPendingPhoto());
+  // 暂存图只用于「相机页杀掉 WebView 后恢复」。正常关闭 AI 助手即视为本轮结束：
+  // 清掉暂存，下次打开从空白开始，不会把上一轮（含失败的）照片再自动上传一遍。
+  useEffect(() => () => clearAiPendingPhoto(), []);
   const [status, setStatus] = useState<Status>('idle');
   const [progress, setProgress] = useState(0);
   const [detecting, setDetecting] = useState(false);

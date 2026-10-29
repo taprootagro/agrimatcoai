@@ -332,6 +332,31 @@
     background-color: #000000;
   }
 
+  /* Capacitor WebView 非 standalone：顶/底安全区铺黑，与 VideoFeedPage 播放器一致 */
+  html[data-native][data-live-video] #root::before {
+    content: "";
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: var(--safe-area-inset-top, env(safe-area-inset-top, 0px));
+    background-color: #000000;
+    z-index: 9998;
+    pointer-events: none;
+  }
+
+  html[data-native][data-live-video] #root::after {
+    content: "";
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px));
+    background-color: #000000;
+    z-index: 9998;
+    pointer-events: none;
+  }
+
   /* 已安装 PWA：顶栏/状态区绿色与首页头图一致；底部 body 白底配合 Dock + safe-bottom */
   @media (display-mode: standalone) {
     html {

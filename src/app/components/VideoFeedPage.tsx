@@ -140,7 +140,9 @@ export function VideoFeedPage({ onClose, startIndex = 0 }: VideoFeedPageProps) {
   }, []);
 
   // 首页直播全屏：状态栏 / 底部触控条区域与黑色背景一致（PWA theme-color + html/body；原生 SystemBars）
-  useEffect(() => mountLiveVideoChrome(), []);
+  useEffect(() => {
+    return mountLiveVideoChrome();
+  }, []);
 
   const handleCloseWithAnim = useCallback(() => {
     setAnimPhase('leaving');

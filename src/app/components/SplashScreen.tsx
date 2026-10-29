@@ -31,13 +31,12 @@ export function SplashScreen() {
   const { t } = useLanguage();
   const splash = useMemo((): SplashScreenConfig => {
     const s = config?.splashScreen;
-    const nativeMin = isNative() ? 800 : SPLASH_DEFAULTS.minDisplayMs;
-    if (!s) return { ...SPLASH_DEFAULTS, minDisplayMs: nativeMin };
+    if (!s) return { ...SPLASH_DEFAULTS };
     return {
       imageUrl: typeof s.imageUrl === "string" ? s.imageUrl : "",
       minDisplayMs: Number.isFinite(s.minDisplayMs)
-        ? Math.max(0, isNative() ? Math.min(s.minDisplayMs, 800) : s.minDisplayMs)
-        : (isNative() ? 800 : SPLASH_DEFAULTS.minDisplayMs),
+        ? Math.max(0, s.minDisplayMs)
+        : SPLASH_DEFAULTS.minDisplayMs,
       maxResourceWaitMs: Number.isFinite(s.maxResourceWaitMs)
         ? Math.max(300, s.maxResourceWaitMs)
         : SPLASH_DEFAULTS.maxResourceWaitMs,

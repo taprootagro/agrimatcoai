@@ -1219,6 +1219,11 @@ export async function applyLiveVideoSystemChrome(): Promise<void> {
   } catch {
     /* non-fatal */
   }
+  try {
+    await statusBar.setBackgroundColor('#000000');
+  } catch {
+    /* Android 15+ may ignore; CSS safe-area fills gap */
+  }
   await navigationBar.setColor('#000000', false);
 }
 

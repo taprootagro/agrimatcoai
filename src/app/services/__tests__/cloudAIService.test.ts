@@ -14,6 +14,7 @@ import {
   cloudAIService,
   getCloudAIHealth,
   AI_PROVIDER_MISCONFIGURED,
+  AI_EMPTY_RESPONSE,
   UPSTREAM_BUSY,
   buildCloudAiHistory,
 } from "../CloudAIService";
@@ -113,6 +114,77 @@ describe("CloudAIService error mapping", () => {
       cloudAIService.followUp("hi", "prev", "en", undefined, (d) => deltas.push(d)),
     ).resolves.toBe("Hello");
     expect(deltas).toEqual(["Hel", "lo"]);
+  });
+});
+
+describe("CloudAIService.analyze empty / non-string payloads", () => {
+  const fetchMock = vi.fn();
+  // Tiny data URL: already under the cloud max size, so prepareImageForCloudAI skips canvas compression.
+  const tinyImage = "data:image/jpeg;base64," + "A".repeat(64);
+
+  beforeEach(() => {
+    localStorage.clear();
+    writeBackendConfig();
+    cloudAIGuard.clearAll();
+    cloudAIGuard.updateConfig({ cooldownSeconds: 0, dailyLimit: 999 });
+    fetchMock.mockReset();
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("rejects with AI_EMPTY_RESPONSE on 200 + empty analysis, and does not cache or count the call", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ analysis: "", provider: "qwen", model: "qwen-vl" }, 200));
+    const before = cloudAIGuard.getDailyUsage().used;
+    await expect(cloudAIService.analyze(tinyImage, [], "en")).rejects.toThrow(AI_EMPTY_RESPONSE);
+    expect(cloudAIGuard.getDailyUsage().used).toBe(before);
+
+    // Second attempt must hit the network again (no dedup entry for the failed round).
+    fetchMock.mockResolvedValue(jsonResponse({ analysis: "Leaf rust, apply fungicide.", provider: "qwen", model: "qwen-vl" }, 200));
+    await expect(cloudAIService.analyze(tinyImage, [], "en")).resolves.toMatchObject({
+      analysis: "Leaf rust, apply fungicide.",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("joins OpenAI vision-style array content into the analysis text", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(
+        { choices: [{ message: { content: [{ type: "text", text: "Early " }, { type: "text", text: "blight." }] } }] },
+        200,
+      ),
+    );
+    await expect(cloudAIService.analyze(tinyImage, [], "en")).resolves.toMatchObject({ analysis: "Early blight." });
+  });
+
+  it("surfaces the Edge EMPTY_RESPONSE stream error as a retryable failure", async () => {
+    fetchMock.mockResolvedValue(
+      new Response('data: {"error":"EMPTY_RESPONSE"}\n\n', {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      }),
+    );
+    await expect(cloudAIService.analyze(tinyImage, [], "en")).rejects.toThrow("EMPTY_RESPONSE");
+  });
+
+  it("ignores a legacy cached placeholder and re-requests", async () => {
+    const legacy = JSON.stringify({
+      provider: "qwen",
+      model: "qwen-vl",
+      analysis:
+        "The cloud AI returned a response but the analysis text could not be extracted. Raw response logged to console.",
+      timestamp: Date.now(),
+    });
+    await cloudAIGuard.cacheResult(tinyImage, legacy, "en");
+    fetchMock.mockResolvedValue(jsonResponse({ analysis: "Fresh answer" }, 200));
+    await expect(cloudAIService.analyze(tinyImage, [], "en")).resolves.toMatchObject({ analysis: "Fresh answer" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
 

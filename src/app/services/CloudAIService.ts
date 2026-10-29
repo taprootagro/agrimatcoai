@@ -239,6 +239,8 @@ export const AI_PROVIDER_MISCONFIGURED = 'AI_PROVIDER_MISCONFIGURED';
 export const IMAGE_TOO_LARGE = 'IMAGE_TOO_LARGE';
 export const IMAGE_DECODE_FAILED = 'IMAGE_DECODE_FAILED';
 export const ABORTED = 'ABORTED';
+/** HTTP 2xx but no analysis text in the payload (empty stream / refusal / unknown shape). Not cached, not counted. */
+export const AI_EMPTY_RESPONSE = 'AI_EMPTY_RESPONSE';
 
 /** Cloud AI enabled but no backend endpoint — mock blocked in production builds. */
 export const CLOUD_AI_MOCK = 'CLOUD_AI_MOCK';
@@ -295,6 +297,8 @@ const KNOWN_CLOUD_AI_ERRORS = new Set([
   IMAGE_DECODE_FAILED,
   "RATE_LIMITED",
   "CHAT_TOO_FAST",
+  AI_EMPTY_RESPONSE,
+  "EMPTY_RESPONSE",
 ]);
 
 function mapFetchFailure(err: unknown, externalSignal?: AbortSignal): Error {
@@ -507,25 +511,48 @@ async function mapAuthOrRateLimitError(res: Response): Promise<string | null> {
   return null;
 }
 
-function extractAnalysisText(data: unknown, cfgProvider: string, cfgModel: string): DeepAnalysisResult {
-  let analysisText = "";
-  if (typeof data === "string") {
-    analysisText = data;
-  } else if (data && typeof data === "object") {
-    const d = data as Record<string, unknown>;
-    if (typeof d.analysis === "string") analysisText = d.analysis;
-    else if (typeof d.text === "string") analysisText = d.text;
-    else if (typeof d.content === "string") analysisText = d.content;
-    else {
-      const choices = d.choices as { message?: { content?: string } }[] | undefined;
-      if (choices?.[0]?.message?.content) analysisText = choices[0].message.content;
-    }
+/** OpenAI vision / Gemini may return `content` as an array of text parts instead of a string. */
+function textFromContentParts(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!Array.isArray(value)) return "";
+  return value
+    .map((p) => {
+      if (typeof p === "string") return p;
+      if (p && typeof p === "object" && typeof (p as { text?: unknown }).text === "string") {
+        return (p as { text: string }).text;
+      }
+      return "";
+    })
+    .join("");
+}
+
+/** Normalised analysis text from any supported response shape; "" when none. */
+function pickAnalysisText(data: unknown): string {
+  if (typeof data === "string") return data;
+  if (!data || typeof data !== "object") return "";
+  const d = data as Record<string, unknown>;
+  const direct = textFromContentParts(d.analysis) || textFromContentParts(d.text) || textFromContentParts(d.content);
+  if (direct) return direct;
+  const choices = d.choices as { message?: { content?: unknown; refusal?: unknown } }[] | undefined;
+  const msg = choices?.[0]?.message;
+  if (msg) {
+    const fromChoice = textFromContentParts(msg.content) || textFromContentParts(msg.refusal);
+    if (fromChoice) return fromChoice;
   }
+  const output = d.output as { text?: unknown } | undefined;
+  const fromOutput = textFromContentParts(output?.text);
+  if (fromOutput) return fromOutput;
+  const candidates = d.candidates as { content?: { parts?: unknown } }[] | undefined;
+  return textFromContentParts(candidates?.[0]?.content?.parts);
+}
+
+function extractAnalysisText(data: unknown, cfgProvider: string, cfgModel: string): DeepAnalysisResult {
+  const analysisText = pickAnalysisText(data).trim();
 
   if (!analysisText) {
+    // 不再伪装成成功：抛错让 UI 显示「分析失败，请重试」，且不计入额度 / 不写入去重缓存
     console.warn("[CloudAI] Could not extract analysis text from response:", data);
-    analysisText =
-      "The cloud AI returned a response but the analysis text could not be extracted. Raw response logged to console.";
+    throw new Error(AI_EMPTY_RESPONSE);
   }
 
   const d = (data && typeof data === "object" ? (data as Record<string, unknown>) : {}) as Record<string, unknown>;
@@ -808,10 +835,14 @@ class CloudAIService {
     // ---- Dedup Cache Check ----
     const { result: cachedResultJson, hash: dedupHash } = await cloudAIGuard.checkDedup(compressedImage, uiLanguage);
     if (cachedResultJson) {
-      console.log('[CloudAI] Returning cached dedup result');
       const cached = JSON.parse(cachedResultJson) as DeepAnalysisResult;
-      cached.timestamp = Date.now(); // refresh timestamp
-      return cached;
+      // 旧版本曾把「无法提取正文」的占位文案当成功缓存 24h；这类条目一律跳过，重新请求
+      const cachedText = typeof cached.analysis === "string" ? cached.analysis.trim() : "";
+      if (cachedText && !cachedText.startsWith("The cloud AI returned a response but")) {
+        console.log('[CloudAI] Returning cached dedup result');
+        cached.timestamp = Date.now(); // refresh timestamp
+        return cached;
+      }
     }
 
     if (endpoint) {
