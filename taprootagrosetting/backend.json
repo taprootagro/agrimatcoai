@@ -1,0 +1,12 @@
+{
+  "backendProxyConfig": {
+    "supabaseUrl": "https://zaxctzplpsaljoworvfr.supabase.co",
+    "supabaseAnonKey": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpheGN0enBscHNhbGpvd29ydmZyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTMxNzcyNzIsImV4cCI6MjEwODc1MzI3Mn0.tNYvAyWdSkN-dI88zKHEM-Q1FWIJ0zTX_zUd_Rh8-1w",
+    "edgeFunctionName": "server",
+    "enabled": true,
+    "chatProvider": "supabase",
+    "imMode": "im-provider-direct",
+    "cmsStorageProvider": "supabase",
+    "mediaCdnBaseUrl": ""
+  }
+}

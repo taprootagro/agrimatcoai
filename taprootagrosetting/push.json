@@ -1,0 +1,42 @@
+{
+  "pushConfig": {
+    "vapidPublicKey": "BFxuHPEYqeb4PfQaC3MqHhSCbUjAHzArj1aLDMmMOeftEgtPLH09heiS7FA0rY-dlUJEAAsce1OA1XnIlZVRwig",
+    "pushApiBase": "",
+    "enabled": true
+  },
+  "pushProvidersConfig": {
+    "activeProvider": "webpush",
+    "webpush": {
+      "enabled": false,
+      "vapidPublicKey": "",
+      "pushApiBase": ""
+    },
+    "fcm": {
+      "enabled": false,
+      "apiKey": "",
+      "projectId": "",
+      "appId": "",
+      "messagingSenderId": "",
+      "vapidKey": ""
+    },
+    "onesignal": {
+      "enabled": false,
+      "appId": "",
+      "safariWebId": ""
+    },
+    "jpush": {
+      "enabled": false,
+      "appKey": "",
+      "masterSecret": "",
+      "channel": "",
+      "pushApiBase": ""
+    },
+    "getui": {
+      "enabled": false,
+      "appId": "",
+      "appKey": "",
+      "masterSecret": "",
+      "pushApiBase": ""
+    }
+  }
+}

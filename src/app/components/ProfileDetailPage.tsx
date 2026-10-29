@@ -1,0 +1,780 @@
+import { useState, useRef, useCallback, useEffect, useMemo } from "react";
+import { Camera, User, Copy, Check, MapPin, Loader2 } from "lucide-react";
+import { SecondaryView } from "./SecondaryView";
+import { useLanguage } from "../hooks/useLanguage";
+import { useConfigContext } from "../hooks/ConfigProvider";
+import {
+  getUserId,
+  isServerAssignedId,
+  getSessionAccessTokenForEdge,
+} from "../utils/auth";
+import { getSupabaseBrowserClient } from "../utils/supabaseBrowser";
+import { extractGoogleLinkedEmail } from "../utils/authLinkedAccounts";
+import {
+  getLinkedGoogleCache,
+  setLinkedGoogleCache,
+} from "../utils/linkedGoogleCache";
+import {
+  formatProfileEditCooldownMessage,
+  getProfileEditCooldownRemainingMs,
+  recordProfileEditCooldownSave,
+} from "../utils/profileEditCooldown";
+import { compressImageFile, COMPRESS_PRESETS } from "../utils/imageCompressor";
+import {
+  defaultDialForLanguage,
+  formatStoredPhone,
+  isValidProfilePhoneParts,
+  matchDialFromInput,
+  parsePhoneParts,
+} from "../utils/phoneCountry";
+import {
+  detectCountryFromGps,
+  normalizeCountryIso,
+  profileCountrySelectOptions,
+} from "../utils/profileCountry";
+
+function profileFieldClass(invalid: boolean, extra = ""): string {
+  const base =
+    "w-full bg-gray-50 rounded-xl text-sm text-gray-800 outline-none transition-shadow " +
+    extra;
+  return invalid
+    ? `${base} ring-1 ring-red-400 border border-red-300 bg-red-50/25`
+    : `${base} focus:ring-2 focus:ring-emerald-300`;
+}
+
+function profilePhoneShellClass(invalid: boolean): string {
+  return invalid
+    ? "ring-1 ring-red-400 border border-red-300 bg-red-50/25"
+    : "bg-gray-50 focus-within:ring-2 focus-within:ring-emerald-300";
+}
+
+const AVATAR_CLIENT_MAX = 400_000;
+/** data: 头像超过此长度则不放进 POST body，避免 Edge/浏览器内存尖峰导致失败或闪退；文字资料仍同步 */
+const AVATAR_DATA_URL_EDGE_MAX = 96_000;
+const PICKUP_MAX = 200;
+
+export interface EdgeProfileSnapshot {
+  displayName: string;
+  phone: string;
+  pickupAddress: string;
+  avatarUrl: string;
+}
+
+interface ProfileDetailPageProps {
+  onClose: () => void;
+  /** 来自 Edge GET /profile 的 profile JSON（扩展字段） */
+  dbProfile?: Record<string, unknown> | null;
+  /** 来自 Edge 列字段，优先于 dbProfile / 本地 */
+  edgeSnapshot?: EdgeProfileSnapshot | null;
+  profileLoading?: boolean;
+  profileError?: string | null;
+  onRemoteProfileSaved?: () => void;
+  /** Edge 判定资料是否已完善；未完善时不做编辑频率限制（首次填写可多次保存） */
+  profileCompleted?: boolean;
+}
+
+export function ProfileDetailPage({
+  onClose,
+  dbProfile = null,
+  edgeSnapshot = null,
+  profileLoading = false,
+  profileError = null,
+  onRemoteProfileSaved,
+  profileCompleted = false,
+}: ProfileDetailPageProps) {
+  const { t, language } = useLanguage();
+  const { config, saveConfig } = useConfigContext();
+
+  const userId = getUserId();
+  const isServer = isServerAssignedId();
+
+  const [name, setName] = useState(
+    isServer ? "" : config?.userProfile?.name || "",
+  );
+  const [avatar, setAvatar] = useState(
+    isServer ? "" : config?.userProfile?.avatar || "",
+  );
+  const [pickup, setPickup] = useState(
+    (isServer ? "" : config?.userProfile?.pickupAddress || "").slice(
+      0,
+      PICKUP_MAX,
+    ),
+  );
+  const [dialCode, setDialCode] = useState(
+    () => parsePhoneParts(
+      (isServer ? "" : config?.userProfile?.phone || "").trim(),
+      defaultDialForLanguage(language),
+    ).dial,
+  );
+  const [nationalNumber, setNationalNumber] = useState(
+    () => parsePhoneParts(
+      (isServer ? "" : config?.userProfile?.phone || "").trim(),
+      defaultDialForLanguage(language),
+    ).national,
+  );
+  const [countryIso, setCountryIso] = useState(() =>
+    normalizeCountryIso(isServer ? "" : config?.userProfile?.country || ""),
+  );
+  const [countryFromGps, setCountryFromGps] = useState(false);
+  const [locatingCountry, setLocatingCountry] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [showFieldErrors, setShowFieldErrors] = useState(!profileCompleted);
+  const [toast, setToast] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [linkedGoogleEmail, setLinkedGoogleEmail] = useState<string>(() =>
+    isServer ? (getLinkedGoogleCache() ?? "") : "",
+  );
+
+  const applyStoredPhone = useCallback((raw: string) => {
+    const parts = parsePhoneParts(raw, defaultDialForLanguage(language));
+    setDialCode(parts.dial);
+    setNationalNumber(parts.national);
+  }, [language]);
+
+  const avatarInputRef = useRef<HTMLInputElement>(null);
+  const lastServerHydrationKeyRef = useRef("");
+  const mustCompleteProfile = isServer && !profileCompleted;
+
+  const countryFromProfileJson = useCallback(
+    (p: Record<string, unknown> | null | undefined): string => {
+      if (!p || typeof p.country !== "string") return "";
+      return normalizeCountryIso(p.country);
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (!isServer) {
+      setLinkedGoogleEmail("");
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const client = getSupabaseBrowserClient();
+      if (!client) return;
+      const { data: { user } } = await client.auth.getUser();
+      if (cancelled) return;
+      const g = extractGoogleLinkedEmail(user ?? undefined);
+      if (g) {
+        setLinkedGoogleCache(g);
+        setLinkedGoogleEmail(g);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isServer]);
+
+  /** 仅从服务端快照灌表单；避免 saveConfig 后 edge 旧数据把输入框清空。 */
+  useEffect(() => {
+    if (profileLoading || saving) return;
+
+    const snap = edgeSnapshot;
+    const hydrationKey = JSON.stringify({
+      snap,
+      db: dbProfile,
+      loading: profileLoading,
+    });
+    if (hydrationKey === lastServerHydrationKeyRef.current) return;
+    lastServerHydrationKeyRef.current = hydrationKey;
+
+    if (snap) {
+      if (isServer) {
+        setName(snap.displayName || "");
+        setAvatar(snap.avatarUrl || "");
+        applyStoredPhone(snap.phone || "");
+        setPickup((snap.pickupAddress || "").slice(0, PICKUP_MAX));
+      } else {
+        setName(snap.displayName || config?.userProfile?.name || "");
+        setAvatar(snap.avatarUrl || config?.userProfile?.avatar || "");
+        applyStoredPhone(snap.phone || config?.userProfile?.phone || "");
+        setPickup(
+          (snap.pickupAddress || config?.userProfile?.pickupAddress || "").slice(
+            0,
+            PICKUP_MAX,
+          ),
+        );
+      }
+      const fromDb = countryFromProfileJson(dbProfile);
+      const fromLocal = normalizeCountryIso(config?.userProfile?.country || "");
+      const nextCountry = fromDb || fromLocal;
+      if (nextCountry) {
+        setCountryFromGps(false);
+        setCountryIso(nextCountry);
+      }
+      return;
+    }
+    const p = dbProfile;
+    const fromDbPhone = p && typeof p.phone === "string" ? p.phone : "";
+    const fromDbName = p && typeof p.name === "string" ? p.name : "";
+    const fromDbAvatar = p && typeof p.avatar === "string" ? p.avatar : "";
+    const fromDbPickup =
+      p && typeof p.pickup_address === "string"
+        ? p.pickup_address
+        : p && typeof p.pickupAddress === "string"
+          ? p.pickupAddress
+          : "";
+    if (isServer) {
+      applyStoredPhone(fromDbPhone || "");
+      setName(fromDbName || "");
+      setAvatar(fromDbAvatar || "");
+      setPickup((fromDbPickup || "").slice(0, PICKUP_MAX));
+      const nextCountry = countryFromProfileJson(p);
+      if (nextCountry) {
+        setCountryFromGps(false);
+        setCountryIso(nextCountry);
+      }
+    } else {
+      applyStoredPhone(fromDbPhone || config?.userProfile?.phone || "");
+      setName(fromDbName || config?.userProfile?.name || "");
+      setAvatar(fromDbAvatar || config?.userProfile?.avatar || "");
+      setPickup(
+        (fromDbPickup || config?.userProfile?.pickupAddress || "").slice(
+          0,
+          PICKUP_MAX,
+        ),
+      );
+      const nextCountry =
+        countryFromProfileJson(p) ||
+        normalizeCountryIso(config?.userProfile?.country || "");
+      if (nextCountry) {
+        setCountryFromGps(false);
+        setCountryIso(nextCountry);
+      }
+    }
+  }, [
+    dbProfile,
+    edgeSnapshot,
+    isServer,
+    profileLoading,
+    saving,
+    config?.userProfile?.phone,
+    config?.userProfile?.name,
+    config?.userProfile?.avatar,
+    config?.userProfile?.pickupAddress,
+    config?.userProfile?.country,
+    applyStoredPhone,
+    countryFromProfileJson,
+  ]);
+
+  const showToast = useCallback((msg: string) => {
+    setToast(msg);
+    setTimeout(() => setToast(null), 2000);
+  }, []);
+
+  const handleDetectCountry = useCallback(async () => {
+    if (locatingCountry) return;
+    setLocatingCountry(true);
+    try {
+      const result = await detectCountryFromGps(language);
+      if (result.ok) {
+        setCountryIso(result.iso);
+        setCountryFromGps(true);
+        setShowFieldErrors(false);
+        return;
+      }
+      const msg =
+        result.reason === "app_disabled"
+          ? t.profile.countryDetectAppDisabled!
+          : result.reason === "permission_denied"
+            ? t.profile.countryDetectPermissionDenied!
+            : t.profile.countryDetectFailed!;
+      showToast(msg);
+    } finally {
+      setLocatingCountry(false);
+    }
+  }, [
+    language,
+    locatingCountry,
+    showToast,
+    t.profile.countryDetectAppDisabled,
+    t.profile.countryDetectFailed,
+    t.profile.countryDetectPermissionDenied,
+  ]);
+
+  const handleCloseBlocked = useCallback(() => {
+    setShowFieldErrors(true);
+    showToast(t.profile.completeProfileFirst!);
+  }, [showToast, t.profile.completeProfileFirst]);
+
+  const handleAvatarChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (avatarInputRef.current) avatarInputRef.current.value = "";
+
+    try {
+      // compressImageFile 已返回 data URL 字符串，勿再 readAsDataURL（会抛错并落入 catch 用原图）
+      const dataUrl = await compressImageFile(file, COMPRESS_PRESETS.profileAvatar);
+      if (dataUrl) setAvatar(dataUrl);
+    } catch {
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const base64 = ev.target?.result as string;
+        if (base64) setAvatar(base64);
+      };
+      reader.readAsDataURL(file);
+    }
+  }, []);
+
+  const countryOptions = useMemo(
+    () => profileCountrySelectOptions(language),
+    [language],
+  );
+  const dialMatch = matchDialFromInput(dialCode);
+
+  const nameInvalid = showFieldErrors && !name.trim();
+  const countryInvalid = showFieldErrors && !countryIso;
+  const phoneInvalid =
+    showFieldErrors &&
+    (!nationalNumber.replace(/\D/g, "").trim() ||
+      !isValidProfilePhoneParts(dialCode, nationalNumber));
+  const pickupInvalid = showFieldErrors && !pickup.trim();
+  const avatarInvalid = showFieldErrors && !avatar;
+
+  const handleSave = useCallback(async () => {
+    const pickupTrim = pickup.trim().slice(0, PICKUP_MAX);
+    let av =
+      avatar || (isServer ? "" : config?.userProfile?.avatar || "");
+    if (av.length > AVATAR_CLIENT_MAX) {
+      showToast(t.profile.avatarTooLarge!);
+      return;
+    }
+
+    const nameEmpty = !name.trim();
+    const countryEmpty = !countryIso;
+    const phoneEmpty = !nationalNumber.replace(/\D/g, "").trim();
+    const pickupEmpty = !pickupTrim;
+    if (nameEmpty || countryEmpty || phoneEmpty || pickupEmpty) {
+      setShowFieldErrors(true);
+      showToast(t.profile.completeProfileFirst!);
+      return;
+    }
+
+    const cooldownSec = Math.max(
+      0,
+      Math.floor(Number(config?.profileEditCooldownSeconds ?? 0)),
+    );
+    if (profileCompleted && cooldownSec > 0) {
+      const rem = getProfileEditCooldownRemainingMs(cooldownSec);
+      if (rem > 0) {
+        showToast(
+          formatProfileEditCooldownMessage(
+            t.profile.profileEditCooldownWait!,
+            rem,
+          ),
+        );
+        return;
+      }
+    }
+
+    if (!isValidProfilePhoneParts(dialCode, nationalNumber)) {
+      setShowFieldErrors(true);
+      showToast(t.login.invalidPhone);
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const displayName =
+        name.trim() ||
+        (isServer ? "" : config?.userProfile?.name || "") ||
+        t.profile.defaultDisplayNameFallback!;
+      const phoneTrim = formatStoredPhone(dialCode, nationalNumber);
+
+      const updated = {
+        ...config,
+        userProfile: {
+          ...(config?.userProfile || {}),
+          name: displayName,
+          avatar: av,
+          phone: phoneTrim,
+          pickupAddress: pickupTrim,
+          country: countryIso,
+        },
+      };
+      saveConfig(updated);
+
+      let cloudSyncSucceeded: boolean | null = null; // null = 未尝试云同步
+      if (userId && isServer) {
+        try {
+          const backendCfg = config?.backendProxyConfig;
+          const url = String(backendCfg?.supabaseUrl || "").trim();
+          const anon = String(backendCfg?.supabaseAnonKey || "").trim();
+          /** 与 getSupabaseBrowserClient 一致：只要 URL/anon 有效且未显式关闭 enabled，即尝试 POST /profile（避免合并配置丢 enabled 导致只存本地） */
+          const canPostProfile =
+            !!url &&
+            !url.includes("your-") &&
+            !!anon &&
+            backendCfg?.enabled !== false;
+
+          if (canPostProfile) {
+            const token = await getSessionAccessTokenForEdge();
+            if (!token) {
+              console.warn("[ProfileDetail] No access token — skip cloud profile sync");
+              showToast(t.profile.profileCloudSyncFailed!);
+              cloudSyncSucceeded = false;
+            } else {
+              const url =
+                `${String(backendCfg?.supabaseUrl || "").replace(/\/+$/, "")}/functions/v1/${(backendCfg?.edgeFunctionName || "server").replace(/^\//, "")}/profile`;
+              const payload: Record<string, unknown> = {
+                displayName,
+                phone: phoneTrim,
+                pickupAddress: pickupTrim,
+                profile: { country: countryIso },
+              };
+              if (
+                av &&
+                (av.startsWith("http://") ||
+                  av.startsWith("https://") ||
+                  (av.startsWith("data:image/") &&
+                    av.length <= AVATAR_DATA_URL_EDGE_MAX))
+              ) {
+                payload.avatarUrl = av;
+              }
+              const res = await fetch(url, {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  ...(backendCfg?.supabaseAnonKey
+                    ? { apikey: backendCfg.supabaseAnonKey }
+                    : {}),
+                  Authorization: `Bearer ${token}`,
+                },
+                body: JSON.stringify(payload),
+              });
+              if (res.ok) {
+                onRemoteProfileSaved?.();
+                cloudSyncSucceeded = true;
+              } else {
+                const errJson = (await res.json().catch(() => ({}))) as {
+                  error?: string;
+                  retryAfterSeconds?: number;
+                };
+                let detail = (errJson.error || `${res.status}`).trim();
+                if (
+                  res.status === 429 &&
+                  typeof errJson.retryAfterSeconds === "number" &&
+                  errJson.retryAfterSeconds > 0
+                ) {
+                  showToast(
+                    formatProfileEditCooldownMessage(
+                      t.profile.profileEditCooldownWait!,
+                      errJson.retryAfterSeconds * 1000,
+                    ),
+                  );
+                } else {
+                  showToast(
+                    detail
+                      ? `${t.profile.profileCloudSyncFailed!} (${detail})`
+                      : t.profile.profileCloudSyncFailed!,
+                  );
+                }
+                cloudSyncSucceeded = false;
+              }
+            }
+          }
+        } catch (e) {
+          console.warn("[ProfileDetail] Failed to save profile to cloud", e);
+          showToast(t.profile.profileCloudSyncFailed!);
+          cloudSyncSucceeded = false;
+        }
+      }
+
+      if (cloudSyncSucceeded === true) {
+        showToast(
+          t.profile.profileSavedSynced || t.profile.profileUpdated!,
+        );
+      } else if (cloudSyncSucceeded === false) {
+        /* 失败提示已在上方 */
+      } else {
+        showToast(t.profile.profileSavedLocalOnly!);
+      }
+
+      if (
+        profileCompleted &&
+        cooldownSec > 0 &&
+        cloudSyncSucceeded !== false
+      ) {
+        recordProfileEditCooldownSave();
+      }
+    } catch (err) {
+      console.error("[ProfileDetail] Save error:", err);
+    } finally {
+      setSaving(false);
+    }
+  }, [
+    pickup,
+    avatar,
+    config,
+    name,
+    dialCode,
+    nationalNumber,
+    countryIso,
+    saveConfig,
+    showToast,
+    t,
+    userId,
+    isServer,
+    onRemoteProfileSaved,
+    profileCompleted,
+  ]);
+
+  const handleCopyId = useCallback(() => {
+    if (userId) {
+      navigator.clipboard?.writeText(userId).then(() => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      }).catch(() => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      });
+    }
+  }, [userId]);
+
+  const saveFooter = (
+    <div className="px-4 pt-2 pb-1">
+      <button
+        type="button"
+        onClick={() => void handleSave()}
+        disabled={saving}
+        className="w-full bg-emerald-600 text-white py-3.5 rounded-2xl font-medium shadow-lg active:bg-emerald-700 active:scale-[0.98] transition-all disabled:opacity-60 disabled:active:scale-100"
+      >
+        {saving
+          ? t.profile.profileSaving || t.common.loading
+          : t.common.save}
+      </button>
+    </div>
+  );
+
+  return (
+    <SecondaryView
+      onClose={onClose}
+      title={t.profile.editProfile!}
+      showTitle={true}
+      footer={saveFooter}
+      closeBlocked={mustCompleteProfile}
+      onCloseBlocked={handleCloseBlocked}
+    >
+      {toast && (
+        <div className="fixed top-20 left-1/2 -translate-x-1/2 z-[999] bg-gray-800 text-white text-sm px-4 py-2 rounded-full shadow-lg animate-fade-in">
+          {toast}
+        </div>
+      )}
+
+      <div className="p-4 pb-6 space-y-6">
+        <div className="flex flex-col items-center pt-4">
+          <input
+            ref={avatarInputRef}
+            type="file"
+            accept="image/*"
+            onChange={handleAvatarChange}
+            className="hidden"
+          />
+          <div className="relative">
+            <div
+              className={`relative h-24 w-24 overflow-hidden rounded-full bg-gradient-to-br from-emerald-400 to-emerald-600 shadow-xl ${
+                avatarInvalid ? "ring-2 ring-red-400" : "ring-4 ring-emerald-100"
+              }`}
+            >
+              {avatar ? (
+                <img
+                  src={avatar}
+                  alt={t.profile.profileAvatarAlt || ""}
+                  className="absolute inset-0 h-full w-full object-cover object-center"
+                  decoding="async"
+                />
+              ) : (
+                <div className="absolute inset-0 flex items-center justify-center bg-white">
+                  <span className="text-4xl leading-none" aria-hidden>
+                    🌿
+                  </span>
+                </div>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => avatarInputRef.current?.click()}
+              className="absolute -bottom-1 -right-1 w-9 h-9 bg-emerald-500 rounded-full flex items-center justify-center shadow-lg active:scale-90 transition-transform ring-3 ring-white"
+              aria-label={t.profile.changeAvatarA11y}
+            >
+              <Camera className="w-4 h-4 text-white" aria-hidden />
+            </button>
+          </div>
+        </div>
+
+        {linkedGoogleEmail ? (
+          <div className="w-full bg-white rounded-2xl p-4 shadow-sm border border-gray-100">
+            <p className="text-xs font-medium text-gray-500 mb-2">
+              {t.profile.linkedLoginTitle!}
+            </p>
+            <p className="text-sm text-gray-900 font-medium break-all">
+              <span className="text-gray-500 font-normal">
+                {t.profile.linkedLoginGoogle}{" "}
+              </span>
+              {linkedGoogleEmail}
+            </p>
+          </div>
+        ) : null}
+
+        <div className="bg-white rounded-2xl p-4 shadow-sm space-y-4">
+          <div>
+            <label className="text-xs font-medium text-gray-500 mb-1.5 block">
+              {t.profile.nickname!}
+            </label>
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder={t.profile.nicknamePlaceholder}
+              className={`${profileFieldClass(nameInvalid)} placeholder-gray-400 px-4 py-3`}
+            />
+          </div>
+
+          <div>
+            <label className="text-xs font-medium text-gray-500 mb-1.5 block">
+              {t.profile.countryLabel}
+            </label>
+            <div className="flex gap-2 items-stretch">
+              <select
+                value={countryIso}
+                onChange={(e) => {
+                  setCountryFromGps(false);
+                  setCountryIso(normalizeCountryIso(e.target.value));
+                }}
+                aria-label={t.profile.countryLabel}
+                className={`${profileFieldClass(countryInvalid, "flex-1 min-w-0 px-4 py-3 appearance-none")}`}
+              >
+                <option value="">{t.profile.countryPlaceholder}</option>
+                {countryOptions.map((c) => (
+                  <option key={c.iso} value={c.iso}>
+                    {c.label}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={() => void handleDetectCountry()}
+                disabled={locatingCountry}
+                aria-label={t.profile.countryDetectA11y}
+                className={`shrink-0 w-12 rounded-xl flex items-center justify-center active:scale-95 transition-transform disabled:opacity-60 ${profilePhoneShellClass(countryInvalid)}`}
+              >
+                {locatingCountry ? (
+                  <Loader2 className="w-5 h-5 text-emerald-600 animate-spin" />
+                ) : (
+                  <MapPin className="w-5 h-5 text-emerald-600" />
+                )}
+              </button>
+            </div>
+            {countryFromGps && countryIso ? (
+              <p className="text-[10px] text-emerald-600 mt-1 px-1">
+                {t.profile.countryAutoDetected}
+              </p>
+            ) : null}
+          </div>
+
+          <div>
+            <label className="text-xs font-medium text-gray-500 mb-1.5 block">
+              {t.profile.phone!}
+            </label>
+            <div className="flex gap-2" dir="ltr">
+              <div
+                className={`w-[7.5rem] shrink-0 rounded-xl px-2 py-3 flex items-center gap-1 transition-shadow ${profilePhoneShellClass(phoneInvalid)}`}
+              >
+                <span className="text-sm text-gray-400 select-none">+</span>
+                <input
+                  type="tel"
+                  inputMode="numeric"
+                  autoComplete="tel-country-code"
+                  value={dialCode}
+                  onChange={(e) => {
+                    const matched = matchDialFromInput(e.target.value);
+                    setDialCode(matched.dial);
+                  }}
+                  aria-label={t.profile.phoneCountryCode}
+                  className="min-w-0 flex-1 bg-transparent text-sm text-gray-800 outline-none"
+                />
+                {dialMatch.iso ? (
+                  <span className="text-[10px] text-gray-400 shrink-0">
+                    {dialMatch.iso}
+                  </span>
+                ) : null}
+              </div>
+              <input
+                type="tel"
+                inputMode="numeric"
+                autoComplete="tel-national"
+                placeholder={
+                  t.profile.phoneNumberPlaceholder ||
+                  t.profile.phonePlaceholder ||
+                  "15012345678"
+                }
+                value={nationalNumber}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (v.includes("+") || /^\s*00/.test(v)) {
+                    applyStoredPhone(v);
+                    return;
+                  }
+                  setNationalNumber(v.replace(/\D/g, "").slice(0, 15));
+                }}
+                className={`${profileFieldClass(phoneInvalid, "flex-1 min-w-0 placeholder-gray-400 px-4 py-3")}`}
+              />
+            </div>
+            <p className="text-[10px] text-gray-400 mt-1 px-1">{t.profile.phoneHint!}</p>
+          </div>
+
+          <div>
+            <label className="text-xs font-medium text-gray-500 mb-1.5 block">
+              {t.profile.pickupAddressLabel || t.profile.pickupInfo!}
+            </label>
+            <textarea
+              value={pickup}
+              onChange={(e) =>
+                setPickup(e.target.value.slice(0, PICKUP_MAX))
+              }
+              maxLength={PICKUP_MAX}
+              rows={3}
+              placeholder={t.profile.pickupAddressPlaceholder}
+              className={`${profileFieldClass(pickupInvalid, "resize-none placeholder:text-gray-400 px-4 py-3")}`}
+            />
+            <p className="text-[10px] text-gray-400 mt-1 px-1">
+              {(t.profile.pickupAddressLimit || "").replace(
+                "{n}",
+                String(PICKUP_MAX),
+              )}
+            </p>
+          </div>
+
+          {userId && (
+            <div>
+              <label className="text-xs font-medium text-gray-500 mb-1.5 block">
+                {t.profile.userId!}
+              </label>
+              <div className="flex items-center gap-2 bg-gray-50 rounded-xl px-4 py-3">
+                <User className="w-4 h-4 text-gray-400 flex-shrink-0" />
+                <span className="text-sm text-gray-600 font-mono flex-1 truncate">{userId}</span>
+                <button
+                  type="button"
+                  onClick={handleCopyId}
+                  className="flex-shrink-0 active:scale-90 transition-transform"
+                  aria-label={t.profile.copyCode}
+                >
+                  {copied ? (
+                    <Check className="w-4 h-4 text-emerald-500" />
+                  ) : (
+                    <Copy className="w-4 h-4 text-gray-400" />
+                  )}
+                </button>
+              </div>
+              <p className="text-[10px] text-gray-400 mt-1 px-1">
+                {isServer
+                  ? t.profile.userIdServerHint!
+                  : t.profile.userIdLocalHint!}
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+    </SecondaryView>
+  );
+}

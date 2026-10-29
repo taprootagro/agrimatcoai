@@ -1,0 +1,25 @@
+{
+  "profileEditCooldownSeconds": 300,
+  "appBranding": {
+    "logoUrl": "",
+    "appName": "Agrimatco AI",
+    "slogan": "Serving generations of farmers"
+  },
+  "splashScreen": {
+    "imageUrl": "",
+    "minDisplayMs": 2000,
+    "maxResourceWaitMs": 4000,
+    "showSkipButton": true
+  },
+  "desktopIcon": {
+    "appName": "Agrimatco AI",
+    "icon192Url": "",
+    "icon512Url": ""
+  },
+  "filing": {
+    "icpNumber": "",
+    "icpUrl": "",
+    "policeNumber": "",
+    "policeUrl": ""
+  }
+}

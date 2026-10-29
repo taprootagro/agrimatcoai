@@ -1,0 +1,18 @@
+{
+  "aboutUs": {
+    "title": "关于我们",
+    "content": "<p>Agrimatco 致力于为全球农户与合作伙伴提供智能农业解决方案。</p><p></p><p>Agrimatco is dedicated to smart agriculture solutions for farmers and partners worldwide.</p>"
+  },
+  "privacyPolicy": {
+    "title": "隐私政策",
+    "content": "<p>我们尊重并保护所有使用 Agrimatco AI 服务的用户的隐私。</p><p></p><p>We respect and protect the privacy of all users of Agrimatco AI.</p>"
+  },
+  "termsOfService": {
+    "title": "用户协议",
+    "content": "<p>欢迎使用 Agrimatco AI。使用本服务即表示您同意遵守适用条款。</p><p></p><p>Welcome to Agrimatco AI. By using this service you agree to the applicable terms.</p>"
+  },
+  "technicalSupport": {
+    "title": "技术支持",
+    "content": "<p>本项目由taprootagro提供技术支持。我们提供全流程技术支持，助力您零门槛实现同款产品的快速部署与稳定运行。如有需求，欢迎联系咨询。</p><p><br></p><p>Support by taprootagro.</p><p><span>Fully open-source. We offer full-cycle technical support for barrier-free deployment and stable operation. Contact us to get started.</span></p><p><br></p><p><strong>Taprootagro Technology Limited</strong></p><p>Website:&nbsp;www.taprootagro.com</p><p>Email:&nbsp;Info@taprootagro.com</p>"
+  }
+}

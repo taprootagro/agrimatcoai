@@ -1,0 +1,24 @@
+{
+  "liveShareConfig": {
+    "enabled": false,
+    "shareUrl": "",
+    "shareTitle": "Agrimatco AI Live",
+    "shareText": "",
+    "shareImgUrl": "",
+    "wxJsSdkEnabled": false,
+    "wxAppId": "",
+    "wxSignatureApi": ""
+  },
+  "liveNavigationConfig": {
+    "enabled": false,
+    "latitude": "",
+    "longitude": "",
+    "address": "",
+    "coordSystem": "wgs84",
+    "baiduMap": true,
+    "amapMap": true,
+    "googleMap": true,
+    "appleMaps": true,
+    "waze": true
+  }
+}
