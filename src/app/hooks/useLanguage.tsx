@@ -591,6 +591,8 @@ export interface Translations {
     aiDisabledBothTitle: string;
     aiDisabledBothDesc: string;
     offlineNoAiTitle: string;
+    /** 无网络时简短提示（不含设置/运维指引） */
+    offlineNoNetwork?: string;
     offlineCloudOnlyNoLocal: string;
     cloudAiDisabled: string;
     localAiOffCannotLoad: string;

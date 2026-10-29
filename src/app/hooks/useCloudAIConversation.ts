@@ -306,11 +306,7 @@ export function useCloudAIConversation({ a, language, cloudAIConfig }: CloudAICo
         return null;
       }
       if (msg === CLOUD_AI_MOCK || msg.includes(CLOUD_AI_MOCK)) {
-        setDeepError(
-          language === 'zh' || language === 'zh-TW'
-            ? '云端 AI 后端未配置，无法提供真实分析。'
-            : 'Cloud AI backend is not configured. Real analysis is unavailable.',
-        );
+        setDeepError(a.deepAnalysisNotConfigured || a.deepAnalysisError);
         refreshGuardState();
         return null;
       }

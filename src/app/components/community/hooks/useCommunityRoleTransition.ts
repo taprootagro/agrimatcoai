@@ -20,10 +20,12 @@ export function useCommunityRoleTransition(
 } {
   const [displayMode, setDisplayMode] = useState(targetMode);
   const [transitioning, setTransitioning] = useState(false);
-  const [chatReady, setChatReady] = useState(false);
+  /** 同角色首屏直接可渲染，避免切 Tab 时空一帧 */
+  const [chatReady, setChatReady] = useState(true);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const displayModeRef = useRef(targetMode);
   const enabledRef = useRef(enabled);
+  const prevUserIdRef = useRef<string | null>(userId);
   enabledRef.current = enabled;
 
   useEffect(() => {
@@ -31,11 +33,13 @@ export function useCommunityRoleTransition(
   }, [displayMode]);
 
   useEffect(() => {
+    if (prevUserIdRef.current === userId) return;
+    prevUserIdRef.current = userId;
     setDisplayMode(targetMode);
     displayModeRef.current = targetMode;
     setTransitioning(false);
     setChatReady(false);
-  }, [userId]);
+  }, [userId, targetMode]);
 
   useEffect(() => {
     if (timerRef.current) {
@@ -53,8 +57,8 @@ export function useCommunityRoleTransition(
 
     if (targetMode === displayModeRef.current) {
       setTransitioning(false);
-      const raf = requestAnimationFrame(() => setChatReady(true));
-      return () => cancelAnimationFrame(raf);
+      setChatReady(true);
+      return;
     }
 
     setTransitioning(true);

@@ -1,4 +1,13 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import {
+  createContext,
+  createElement,
+  useContext,
+  useState,
+  useEffect,
+  useCallback,
+  useRef,
+  type ReactNode,
+} from "react";
 import {
   isUserLoggedIn,
   isServerAssignedId,
@@ -134,7 +143,39 @@ function initialEdgeProfileHookState(): InitialEdgeState {
   };
 }
 
-export function useEdgeProfile() {
+export type EdgeProfileContextValue = {
+  contentSuperAdmin: boolean;
+  contentRole: ContentRole;
+  appRole: AppRole;
+  appRoleChosen: boolean;
+  dbProfile: Record<string, unknown> | null;
+  profileCompleted: boolean;
+  displayName: string;
+  phone: string;
+  pickupAddress: string;
+  avatarUrl: string;
+  loading: boolean;
+  error: string | null;
+  refresh: (options?: RefreshProfileOptions) => Promise<void>;
+};
+
+const EdgeProfileContext = createContext<EdgeProfileContextValue | null>(null);
+
+/** 全局单例：避免 Keep-alive 下「我的 / 聊天」各挂载一份 useEdgeProfile 导致重复 loading / 闪屏 */
+export function EdgeProfileProvider({ children }: { children: ReactNode }) {
+  const value = useEdgeProfileState();
+  return createElement(EdgeProfileContext.Provider, { value }, children);
+}
+
+export function useEdgeProfile(): EdgeProfileContextValue {
+  const ctx = useContext(EdgeProfileContext);
+  if (!ctx) {
+    throw new Error("useEdgeProfile must be used within EdgeProfileProvider");
+  }
+  return ctx;
+}
+
+function useEdgeProfileState(): EdgeProfileContextValue {
   const init = initialEdgeProfileHookState();
   const [contentSuperAdmin, setContentSuperAdmin] = useState(init.contentSuperAdmin);
   const [contentRole, setContentRole] = useState<ContentRole>(init.contentRole);

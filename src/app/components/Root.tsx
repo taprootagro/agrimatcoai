@@ -11,6 +11,7 @@ import { installSilentRecovery } from '../utils/silentRecovery';
 import { initTaprootDB } from '../utils/db';
 import { defaultConfig } from '../hooks/useHomeConfig';
 import { ConfigProvider } from '../hooks/ConfigProvider';
+import { EdgeProfileProvider } from '../hooks/useEdgeProfile';
 import { useDynamicManifest } from '../hooks/useDynamicManifest';
 import { app, applyNativeSystemChrome, isNative, preloadVoices, splashScreen } from '../utils/capacitor-bridge';
 import { reapplyLiveVideoChromeIfActive } from '../utils/liveVideoChrome';
@@ -95,9 +96,11 @@ export function Root() {
   return (
     <LanguageProvider>
       <ConfigProvider defaultConfig={defaultConfig}>
-        <ErrorBoundary>
-          <RootInner />
-        </ErrorBoundary>
+        <EdgeProfileProvider>
+          <ErrorBoundary>
+            <RootInner />
+          </ErrorBoundary>
+        </EdgeProfileProvider>
       </ConfigProvider>
     </LanguageProvider>
   );

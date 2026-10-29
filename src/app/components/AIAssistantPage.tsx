@@ -17,6 +17,7 @@ import { VoiceHoldButton } from "./ai/VoiceHoldButton";
 import { useCloudAIConversation } from "../hooks/useCloudAIConversation";
 import { useTtsReader } from "../hooks/useTtsReader";
 import { useVoiceHoldRecorder } from "../hooks/useVoiceHoldRecorder";
+import { FARMER_AI_ONLINE_ONLY } from "../utils/farmerAiMode";
 
 const AI_PENDING_PHOTO_KEY = '__taproot_ai_pending_photo__';
 let aiPendingPhotoMem: string | null = null;
@@ -64,8 +65,12 @@ export function AIAssistantPage({ onClose }: AIAssistantPageProps) {
   // Cloud-only mode: when cloud AI is enabled AND device is online, skip local model
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const cloudAiEnabled = config.cloudAIConfig?.enabled === true;
-  const enableLocalModel = config.aiModelConfig?.enableLocalModel === true;
-  const cloudOnlyMode = cloudAiEnabled && isOnline;
+  const enableLocalModel =
+    !FARMER_AI_ONLINE_ONLY && config.aiModelConfig?.enableLocalModel === true;
+  /** 农户端：云端开启即走在线流程（含 UI），断网时不回退本地 ONNX */
+  const cloudOnlyMode = FARMER_AI_ONLINE_ONLY
+    ? cloudAiEnabled
+    : cloudAiEnabled && isOnline;
   const cloudAiMode = useMemo(
     () => cloudAIService.mode,
     [config.cloudAIConfig, config.backendProxyConfig],
@@ -243,41 +248,7 @@ export function AIAssistantPage({ onClose }: AIAssistantPageProps) {
   const detectorRef = useRef<TaprootAgroDetector | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const pendingDrawRef = useRef<{ img: HTMLImageElement; dets: Detection[] } | null>(null);
-  /** 断网时从 cloud-only 切本地模型只尝试一次，避免 loadModel 失败导致循环 */
-  const offlineLocalLoadTried = useRef(false);
-
-  // 加载模型
-  // Silent background loading (for cloud-only mode)
-  const silentLoadModel = useCallback(async () => {
-    if (!config.aiModelConfig?.enableLocalModel) return;
-    // Skip if already loaded
-    if (detectorRef.current) {
-      console.log('✅ [Cloud Mode] Model already loaded, skipping background load');
-      return;
-    }
-    
-    try {
-      const aiCfg = config.aiModelConfig;
-      if (!aiCfg?.modelUrl) {
-        console.log('⚠️ [Cloud Mode] No model URL configured, skipping background load');
-        return;
-      }
-      
-      console.log('🔍 [Cloud Mode] Background loading local model for emergency fallback...');
-      const detector = new TaprootAgroDetector({
-        modelUrl: aiCfg.modelUrl,
-        labelsUrl: aiCfg.labelsUrl || '',
-      });
-      await detector.loadModel();
-      detectorRef.current = detector;
-      console.log('✅ [Cloud Mode] Local model loaded in background');
-    } catch (err: any) {
-      console.log('⚠️ [Cloud Mode] Background model load failed (will try again on network error):', err?.message);
-      // Silently fail - we'll try again if network actually fails
-    }
-  }, [config.aiModelConfig]);
-
-  // Normal loading with UI feedback (for local mode)
+  // Normal loading with UI feedback (for local mode — disabled when FARMER_AI_ONLINE_ONLY)
   const loadModel = useCallback(async () => {
     if (!config.aiModelConfig?.enableLocalModel) {
       setErrorMsg(a.localAiOffCannotLoad);
@@ -316,6 +287,14 @@ export function AIAssistantPage({ onClose }: AIAssistantPageProps) {
   // Initialize: load model based on mode (only runs once on mount)
   useEffect(() => {
     const cloudOn = config.cloudAIConfig?.enabled === true;
+    if (FARMER_AI_ONLINE_ONLY) {
+      if (!cloudOn) {
+        setStatus('ai-disabled');
+        return;
+      }
+      setStatus('cloud-only');
+      return;
+    }
     const localOn = config.aiModelConfig?.enableLocalModel === true;
     const online = typeof navigator !== 'undefined' && navigator.onLine;
     const cOnly = cloudOn && online;
@@ -326,7 +305,6 @@ export function AIAssistantPage({ onClose }: AIAssistantPageProps) {
     }
     if (cOnly) {
       setStatus('cloud-only');
-      if (localOn) silentLoadModel();
       return;
     }
     if (localOn) {
@@ -346,35 +324,26 @@ export function AIAssistantPage({ onClose }: AIAssistantPageProps) {
     navigate("/login", { state: { from: "aiAssistant" } });
   }, [navigate]);
 
-  // 断网时从「仅云端」壳切到本地 ONNX（避免长期停在 cloud-only 且无法完整使用本地能力）
-  useEffect(() => {
-    if (isOnline) {
-      offlineLocalLoadTried.current = false;
-      return;
-    }
-    if (status !== 'cloud-only') return;
-    if (detectorRef.current) {
-      setStatus('ready');
-      return;
-    }
-    if (!config.aiModelConfig?.enableLocalModel) return;
-    if (offlineLocalLoadTried.current) return;
-    offlineLocalLoadTried.current = true;
-    loadModel();
-  }, [isOnline, status, loadModel, config.aiModelConfig?.enableLocalModel]);
-
   // Cloud-only mode: auto-trigger analysis as soon as image is set (after session ready)
   const autoTriggeredRef = useRef(false);
   useEffect(() => {
     if (!sessionReady) return;
-    if (cloudOnlyMode && image && !autoTriggeredRef.current && !deepAnalyzing && !deepAnalysisResult && !deepError) {
+    if (
+      cloudOnlyMode &&
+      image &&
+      isOnline &&
+      !autoTriggeredRef.current &&
+      !deepAnalyzing &&
+      !deepAnalysisResult &&
+      !deepError
+    ) {
       autoTriggeredRef.current = true;
       handleDeepAnalysis(true);
     }
     if (!image) {
       autoTriggeredRef.current = false;
     }
-  }, [image, cloudOnlyMode, sessionReady]);
+  }, [image, cloudOnlyMode, sessionReady, isOnline]);
 
   // 系统相机拍照 — Native 优先走 bridge.camera；取消不打开 file input。
   // 拍照结果写入 sessionStorage，避免 Android 相机页杀掉 WebView 后丢图。
@@ -611,21 +580,24 @@ export function AIAssistantPage({ onClose }: AIAssistantPageProps) {
     }
   }, [done, results]);
 
-  /** 云端首诊网络失败时的本地兜底；返回要展示的错误文案，已展示本地结果时返回 null。 */
-  const fallbackToLocalAnalysis = async (imageSrc: string, isCloudOnly: boolean): Promise<string | null> => {
+  /** 云端首诊网络失败：农户端仅提示重试，不回退本地 ONNX。 */
+  const fallbackToLocalAnalysis = async (
+    _imageSrc: string,
+    _isCloudOnly: boolean,
+  ): Promise<string | null> => {
+    if (FARMER_AI_ONLINE_ONLY) {
+      return (
+        a.offlineNoNetwork?.trim() ||
+        (!isOnline ? a.offlineCloudOnlyNoLocal : a.networkErrorHint)
+      );
+    }
     if (!isCloudOnly && results.length > 0 && enableLocalModel) {
-      // Scenario 3a: Network error with cloud AI enabled + local results already available
-      // Fallback to local AI with network warning
       generateLocalAnalysis(results, true);
       return null;
     }
     if (isCloudOnly && enableLocalModel) {
-      // Scenario 3b: Cloud-only mode network error - fallback to local detection
-      // (Model should already be loaded in background, but load if needed)
       try {
-        // Ensure local model is loaded (should already be loaded from background)
         if (!detectorRef.current) {
-          console.log('⚠️ Background model not ready, loading now...');
           const aiCfg = config.aiModelConfig;
           const detector = new TaprootAgroDetector({
             modelUrl: aiCfg?.modelUrl || '',
@@ -633,15 +605,14 @@ export function AIAssistantPage({ onClose }: AIAssistantPageProps) {
           });
           await detector.loadModel();
           detectorRef.current = detector;
-        } else {
-          console.log('✅ Using background-loaded model for fallback');
         }
-
-        // Run local detection
         const img = new Image();
         img.crossOrigin = 'anonymous';
-        img.src = imageSrc;
-        await new Promise<void>((res, rej) => { img.onload = () => res(); img.onerror = rej; });
+        img.src = _imageSrc;
+        await new Promise<void>((res, rej) => {
+          img.onload = () => res();
+          img.onerror = rej;
+        });
         const dets = await detectorRef.current!.detect(img);
         setResults(dets);
         setDone(true);
@@ -652,18 +623,22 @@ export function AIAssistantPage({ onClose }: AIAssistantPageProps) {
         }
         return a.networkErrorHint;
       } catch {
-        // Local detection also failed
         return a.networkErrorHint;
       }
     }
     if (isCloudOnly) return a.offlineCloudOnlyNoLocal;
-    // Network error but no local model available
     return a.networkErrorHint;
   };
 
   // Deep Analysis handler (unified for both local+cloud and cloud-only modes)
   const handleDeepAnalysis = async (forceCloudOnly = false) => {
     if (!image) return;
+    if (FARMER_AI_ONLINE_ONLY && !isOnline) {
+      setDeepError(
+        a.offlineNoNetwork?.trim() || a.networkErrorHint,
+      );
+      return;
+    }
     // In cloud-only mode or forced cloud-only, we don't require local detection results
     const isCloudOnly = cloudOnlyMode || forceCloudOnly;
     if (!isCloudOnly && results.length === 0) return;
@@ -1010,14 +985,20 @@ export function AIAssistantPage({ onClose }: AIAssistantPageProps) {
                   <FolderOpen className="w-8 h-8 text-gray-400" />
                 </div>
                 <h3 className="text-base font-bold text-gray-800 mb-1">
-                  {(cloudAiEnabled && !enableLocalModel && errorMsg) ? a.offlineNoAiTitle : a.noModel}
+                  {FARMER_AI_ONLINE_ONLY || (cloudAiEnabled && !enableLocalModel && errorMsg)
+                    ? a.offlineNoAiTitle
+                    : a.noModel}
                 </h3>
-                <p className="text-xs text-gray-500">
-                  {(cloudAiEnabled && !enableLocalModel && errorMsg) ? a.offlineCloudOnlyNoLocal : (errorMsg || a.noModelDesc)}
+                <p className="text-xs text-gray-500 leading-relaxed">
+                  {FARMER_AI_ONLINE_ONLY
+                    ? a.offlineNoNetwork || a.networkErrorHint
+                    : cloudAiEnabled && !enableLocalModel && errorMsg
+                      ? a.offlineCloudOnlyNoLocal
+                      : errorMsg || a.noModelDesc}
                 </p>
               </div>
 
-              {enableLocalModel ? (
+              {!FARMER_AI_ONLINE_ONLY && enableLocalModel ? (
                 <>
                   <div className="bg-gray-50 rounded-xl p-3.5 mb-4 space-y-2 overflow-hidden">
                     <div className="flex items-start gap-2.5 min-w-0">
@@ -1093,6 +1074,16 @@ export function AIAssistantPage({ onClose }: AIAssistantPageProps) {
                         <img src={image} alt="" className="max-w-48 max-h-48 w-auto h-auto rounded-xl block" />
                       </div>
                     </div>
+
+                    {!isOnline && !deepAnalysisResult && !deepAnalyzing && !deepError ? (
+                      <div className="flex justify-start">
+                        <div className={`bg-amber-50 border border-amber-100 rounded-2xl ${isRTL ? 'rounded-br-md' : 'rounded-bl-md'} px-3 py-2.5 max-w-[90%]`}>
+                          <p className="text-xs text-amber-800 leading-relaxed">
+                            {a.offlineNoNetwork?.trim() || a.networkErrorHint}
+                          </p>
+                        </div>
+                      </div>
+                    ) : null}
 
                     {/* AI正在分析 */}
                     {deepAnalyzing && (

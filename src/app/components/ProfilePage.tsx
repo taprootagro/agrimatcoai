@@ -73,7 +73,7 @@ export function ProfilePage() {
     error: profileError,
     refresh: refreshEdgeProfile,
   } = useEdgeProfile();
-  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [isLoggedIn, setIsLoggedIn] = useState(() => isUserLoggedIn());
   const [showAddressEdit, setShowAddressEdit] = useState(false);
   const [showAllOrders, setShowAllOrders] = useState(false);
   const [showPendingReceipt, setShowPendingReceipt] = useState(false);
